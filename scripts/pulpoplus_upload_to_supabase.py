@@ -239,10 +239,11 @@ def detect_period(df):
     as e.g. 'June 2026', matching pulpoplus_rebuild_summary's own logic."""
     month_counter = Counter()
     for d in df.get("date", []):
-        if not d:
-            continue
+        if not d: continue
+        d_clean = clean_date(d)
+        if not d_clean: continue
         try:
-            dt = datetime.strptime(str(d)[:10], "%Y-%m-%d")
+            dt = datetime.strptime(d_clean[:10], "%Y-%m-%d")
             month_counter[(dt.year, dt.month)] += 1
         except ValueError:
             continue
