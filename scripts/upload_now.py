@@ -71,8 +71,8 @@ def main():
 
     append = not args.replace
     results = [
-        upload_folder(args.recent, "Recent", "recent", append),
-        upload_folder(args.last_month, "Last Month", "last_month", append),
+        upload_folder(args.recent, None, "recent", append),
+        upload_folder(args.last_month, None, "last_month", append),
     ]
 
     print("\n" + "=" * 60)
