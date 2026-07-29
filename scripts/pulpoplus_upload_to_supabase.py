@@ -370,6 +370,32 @@ def upload_workbook(url, key, workbook_path, period=None, batch=None, append=Fal
         sys.exit(1)
 
     if not period:
+        # Standardise columns just like the extractor does so we can read Raw CRM exports directly
+        # as well as already-rebuilt summaries.
+        col_map = {
+            "Employee Code": "user_code",
+            "Employee Name": "user",
+            "Date": "date",
+            "Time": "time",
+            "Shift": "shift",
+            "Account Code": "acc_id",
+            "Account Name": "acc_name",
+            "Doctor Code": "doctor_key",
+            "Doctor Name": "doctor_name",
+            "Specialty": "specialty",
+            "Classification": "classification",
+            "Products": "products",
+            "Visit Type": "visit_type_raw",
+            "Account Type": "acc_type_raw",
+            "Territory": "territory",
+            "Team": "team",
+            "Notes": "notes",
+            "User": "user",
+        }
+        raw_df = raw_df.rename(columns=col_map)
+        # Also ensure we catch lowercase variants if they were somehow missed
+        raw_df.columns = [str(c).lower().strip() for c in raw_df.columns]
+
         period = detect_period(raw_df)
         print(f"   Auto-detected period: {period}")
     batch = batch or period or "unbatched"
@@ -382,9 +408,9 @@ def upload_workbook(url, key, workbook_path, period=None, batch=None, append=Fal
     visit_rows = []
     for _, r in raw_df.iterrows():
         visit_rows.append({
-            "team":                 clean_str(r.get("Team")),
+            "team":                 clean_str(r.get("team")),
             "user":                 clean_str(r.get("user")),
-            "employee_code":        clean_code(r.get("user_code")),
+            "employee_code":        clean_code(r.get("user_code") or r.get("employee code")),
             "territory":            clean_str(r.get("territory")),
             "visit_date":           clean_date(r.get("date")),
             "visit_time":           clean_time(r.get("time")),
@@ -393,9 +419,9 @@ def upload_workbook(url, key, workbook_path, period=None, batch=None, append=Fal
             "shift":                clean_str(r.get("shift")),
             "visit_type_raw":       clean_str(r.get("visit_type_raw")),
             "visit_type_category":  clean_str(r.get("visit_type_category")),
-            "acc_id":               clean_str(r.get("acc_id")),
+            "acc_id":               clean_str(r.get("acc_id") or r.get("acc_name")),
             "acc_name":             clean_str(r.get("acc_name")),
-            "doctor_key":           clean_str(r.get("doctor_key")),
+            "doctor_key":           clean_str(r.get("doctor_key") or r.get("doctor_name")),
             "doctor_name":          clean_str(r.get("doctor_name")),
             "specialty":            clean_str(r.get("specialty")),
             "classification":       clean_str(r.get("classification")),
