@@ -1,0 +1,46 @@
+# ---- Secrets: never commit -------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service_role*.txt
+
+# ---- Node -------------------------------------------------------------
+node_modules/
+npm-debug.log*
+.npm/
+
+# ---- Python -----------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ---- Build output -----------------------------------------------------
+build/
+dist/
+.vercel/
+
+# ---- Data / working files (keep the repo clean of CRM exports) --------
+*.xlsx
+*.xls
+*.csv
+!hierarchy/template*.xlsx
+~$*
+Periods/
+june/
+july/
+hierarchy/*.sql
+
+# ---- Backups created by the theme scripts -----------------------------
+*.bak
+*.bak.*
+
+# ---- OS / editor ------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

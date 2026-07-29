@@ -10,11 +10,15 @@ from watchdog.events import FileSystemEventHandler
 
 # Add the parent directory to sys.path to import the main uploader
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from pulpoplus_upload_to_supabase import upload_workbook, _supabase_config, supabase_delete_where
+    from pulpoplus_config import list_workbooks, wait_until_stable
 except ImportError as e:
-    print("Failed to import upload logic from parent directory.")
+    print("Failed to import upload logic.")
     print("Error:", e)
+    print("Make sure pulpoplus_upload_to_supabase.py and pulpoplus_config.py")
+    print("are in this folder or its parent.")
     sys.exit(1)
 
 def upload_folder(folder, period, batch):
@@ -22,7 +26,11 @@ def upload_folder(folder, period, batch):
     print(f"Processing folder: {folder}")
     print(f"   Period: {period} | Batch: {batch}")
 
-    files = list(Path(folder).glob("*.xlsx"))
+    # list_workbooks() filters out Excel's "~$" lock files, which the old
+    # glob("*.xlsx") happily matched — and since a lock file is created the
+    # instant somebody opens a workbook, it was always the newest by mtime,
+    # so the uploader picked it and crashed on an unreadable file.
+    files = list_workbooks(folder)
     if not files:
         print("   No .xlsx files found — skipping")
         return
@@ -36,6 +44,11 @@ def upload_folder(folder, period, batch):
         for f in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
             print(f"     {'-> ' if f == max(files, key=lambda p: p.stat().st_mtime) else '   '}{f.name}")
     latest = max(files, key=lambda p: p.stat().st_mtime)
+
+    # A file that is still being written (or synced) reads as truncated.
+    if not wait_until_stable(latest):
+        print(f"   {latest.name} is still changing after 60s — skipping this round")
+        return
 
     url, key = _supabase_config()
 
@@ -54,17 +67,43 @@ class FolderHandler(FileSystemEventHandler):
         self.period = period
         self.batch = batch
         self._pending = False
+        self._restart = False
+        self._lock = threading.Lock()
 
     def on_any_event(self, event):
-        if event.is_directory: return
-        if not str(event.src_path).endswith(".xlsx"): return
-        if not self._pending:
+        if event.is_directory:
+            return
+        name = os.path.basename(str(event.src_path))
+        # Ignore Excel lock files and temp files, which fire constantly while
+        # a workbook is simply open and would trigger endless re-uploads.
+        if not name.lower().endswith(".xlsx") or name.startswith("~$") or name.startswith("."):
+            return
+        with self._lock:
+            if self._pending:
+                self._restart = True   # remember work arrived mid-run
+                return
             self._pending = True
-            def run():
-                time.sleep(5) # debounce
-                upload_folder(self.folder, self.period, self.batch)
-                self._pending = False
-            threading.Thread(target=run, daemon=True).start()
+
+        def run():
+            try:
+                while True:
+                    time.sleep(5)  # debounce burst writes
+                    with self._lock:
+                        self._restart = False
+                    try:
+                        upload_folder(self.folder, self.period, self.batch)
+                    except Exception as exc:
+                        print(f"   Upload failed: {exc}")
+                    with self._lock:
+                        if not self._restart:
+                            self._pending = False
+                            return
+            except Exception as exc:
+                print(f"   Watcher thread error: {exc}")
+                with self._lock:
+                    self._pending = False
+
+        threading.Thread(target=run, daemon=True).start()
 
 def main():
     parser = argparse.ArgumentParser()

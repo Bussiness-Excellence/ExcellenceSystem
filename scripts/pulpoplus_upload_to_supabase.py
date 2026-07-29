@@ -15,19 +15,16 @@ like your existing `visits`/`coaching_days` tables already do.
 SETUP (one-time):
     pip install requests pandas openpyxl --break-system-packages
 
-    Set two environment variables (never hardcode these in the script):
-        SUPABASE_URL              e.g. https://xxbfwvlqixnmonxytdxq.supabase.co
-        SUPABASE_SERVICE_ROLE_KEY the "service_role" key from
-                                   Project Settings → API in the Supabase
-                                   dashboard (NOT the anon/public key —
-                                   the service role key is required to
-                                   write through Row Level Security).
+    Copy .env.example to .env and fill in:
+        SUPABASE_URL               your project URL
+        SUPABASE_SERVICE_ROLE_KEY  the "service_role" secret from
+                                   Project Settings -> API (NOT the anon
+                                   key -- the service role key is required
+                                   to write through Row Level Security).
 
-    On Windows PowerShell, set them for the current session with:
-        $env:SUPABASE_URL = "https://xxbfwvlqixnmonxytdxq.supabase.co"
-        $env:SUPABASE_SERVICE_ROLE_KEY = "sb_secret_wijkK4ST6LE9oNZW8sZjhg_aodIr7wB"
-    (Add them to your PowerShell profile, or a .env you source, so you
-    don't have to retype them every session.)
+    Credentials are read from .env by pulpoplus_config. They are never
+    stored in this file. If a key ever appears in source, rotate it in the
+    Supabase dashboard immediately -- anything committed to git is public.
 
 USAGE:
     # Sync the org structure (run whenever the team structure changes)
@@ -55,6 +52,7 @@ import pandas as pd
 import requests
 
 import pulpoplus_hierarchy as hier
+from pulpoplus_config import supabase_config, clean_date, clean_time
 
 CHUNK_SIZE = 500  # rows per HTTP request, to stay well under payload limits
 
@@ -62,10 +60,8 @@ CHUNK_SIZE = 500  # rows per HTTP request, to stay well under payload limits
 # ── Supabase REST helpers ──────────────────────────────────────────────────
 
 def _supabase_config():
-    # Credentials hardcoded for this session
-    url = "https://xxbfwvlqixnmonxytdxq.supabase.co"
-    key = "sb_secret_wijkK4ST6LE9oNZW8sZjhg_aodIr7wB"
-    return url.rstrip("/"), key
+    """Credentials from the environment / .env — never from source."""
+    return supabase_config(require_service_role=True)
 
 
 def _headers(key, prefer=None):
@@ -92,10 +88,12 @@ def supabase_delete_where(url, key, table, column, value):
 
 def supabase_delete_all(url, key, table):
     """DELETE every row in `table` (used for a full hierarchy resync)."""
+    # "id=gt.0" only works for integer primary keys and silently matches
+    # nothing on a uuid PK. "not.is.null" is type-agnostic.
     resp = requests.delete(
         f"{url}/rest/v1/{table}",
-        headers=_headers(key),
-        params={"id": "gt.0"},
+        headers=_headers(key, prefer="return=minimal,count=exact"),
+        params={"id": "not.is.null"},
     )
     if not resp.ok:
         raise RuntimeError(f"Delete-all failed on {table}: {resp.status_code} {resp.text}")
@@ -130,14 +128,37 @@ def supabase_insert(url, key, table, rows, upsert_on=None):
     return total
 
 
+PAGE_SIZE = 1000  # PostgREST's own default hard cap per request
+
+
 def supabase_select(url, key, table, select="*", params=None):
+    """SELECT rows, following pagination until the table is exhausted.
+
+    IMPORTANT: PostgREST caps every response at 1000 rows. The previous
+    version issued a single un-paginated request, so the de-duplication
+    checks below only ever saw the first 1000 existing rows. Once a batch
+    grew past that — which every real month does — re-running an upload
+    re-inserted everything beyond row 1000 as duplicates. This is the main
+    cause of doubled visits and coaching days on the dashboard.
+    """
     p = {"select": select}
     if params:
         p.update(params)
-    resp = requests.get(f"{url}/rest/v1/{table}", headers=_headers(key), params=p)
-    if not resp.ok:
-        raise RuntimeError(f"Select failed on {table}: {resp.status_code} {resp.text}")
-    return resp.json()
+
+    rows = []
+    offset = 0
+    while True:
+        headers = _headers(key)
+        headers["Range-Unit"] = "items"
+        headers["Range"] = f"{offset}-{offset + PAGE_SIZE - 1}"
+        resp = requests.get(f"{url}/rest/v1/{table}", headers=headers, params=p)
+        if not resp.ok:
+            raise RuntimeError(f"Select failed on {table}: {resp.status_code} {resp.text}")
+        page = resp.json()
+        rows.extend(page)
+        if len(page) < PAGE_SIZE:
+            return rows
+        offset += PAGE_SIZE
 
 
 # ── cleaning helpers ────────────────────────────────────────────────────────
@@ -365,8 +386,8 @@ def upload_workbook(url, key, workbook_path, period=None, batch=None, append=Fal
             "user":                 clean_str(r.get("user")),
             "employee_code":        clean_code(r.get("user_code")),
             "territory":            clean_str(r.get("territory")),
-            "visit_date":           clean_str(r.get("date")),
-            "visit_time":           clean_str(r.get("time")),
+            "visit_date":           clean_date(r.get("date")),
+            "visit_time":           clean_time(r.get("time")),
             "acc_type_raw":         clean_str(r.get("acc_type_raw")),
             "acc_type_category":    clean_str(r.get("acc_type_category")),
             "shift":                clean_str(r.get("shift")),
@@ -411,7 +432,7 @@ def upload_workbook(url, key, workbook_path, period=None, batch=None, append=Fal
                 "manager_code":    clean_code(r.get("Manager Code")),
                 "rep_name":        clean_str(r.get("Rep")),
                 "rep_code":        clean_code(r.get("Rep Code")),
-                "coaching_date":   clean_str(r.get("Date")),
+                "coaching_date":   clean_date(r.get("Date")),
                 "team":            clean_str(r.get("Team")),
                 "am_visits":       clean_num(r.get("AM Visits")),
                 "am_accompanied":  clean_num(r.get("AM Accompanied")),
@@ -502,10 +523,11 @@ def upload_workbook(url, key, workbook_path, period=None, batch=None, append=Fal
 
         if append:
             print("Fetching existing summaries to prevent duplicates...")
-            existing = supabase_select(url, key, "summaries", select="user_name", params={"upload_batch": f"eq.{batch}"})
-            existing_keys = {r.get("user_name") for r in existing}
+            existing = supabase_select(url, key, "summaries", select="user_name,employee_code", params={"upload_batch": f"eq.{batch}"})
+            existing_keys = {(r.get("user_name"), r.get("employee_code")) for r in existing}
             before = len(summary_rows)
-            summary_rows = [r for r in summary_rows if r["user_name"] not in existing_keys]
+            summary_rows = [r for r in summary_rows
+                            if (r["user_name"], r["employee_code"]) not in existing_keys]
             if len(summary_rows) < before:
                 print(f"   Skipped {before - len(summary_rows)} existing summary row(s)")
 

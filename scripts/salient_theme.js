@@ -1,28 +1,37 @@
-const fs = require('fs');
+/**
+ * salient_theme.js — apply the Salient premium navy dark theme.
+ *
+ * FIXED: every substitution now reports whether it matched, the files are
+ * backed up before writing, and the script is idempotent (safe to re-run).
+ * The old version printed a success message unconditionally.
+ */
 
-const indexCssPath = 'src/index.css';
-let indexCss = fs.readFileSync(indexCssPath, 'utf8');
+const { CssEditor } = require('./css_utils');
 
-// Update index.css background to the rich radial navy gradient
-indexCss = indexCss.replace(
-  /background:\s*#0B1120;/,
-  'background: radial-gradient(ellipse at center, #101931 0%, #050811 100%); background-attachment: fixed;'
+console.log('Applying Salient Premium Navy theme...');
+
+// ── src/index.css ─────────────────────────────────────────────────────────
+const index = new CssEditor('src/index.css');
+
+index.sub(
+    'body background -> navy radial gradient',
+    /background:\s*#0B1120;/,
+    'background: radial-gradient(ellipse at center, #101931 0%, #050811 100%); background-attachment: fixed;'
 );
-indexCss = indexCss.replace(
-  /linear-gradient\(160deg, transparent 0%, rgba\(255,255,255,0\.01\) 100%\)/,
-  `radial-gradient(circle at 50% 30%, rgba(20, 35, 70, 0.4) 0%, transparent 60%)`
+
+index.sub(
+    'overlay gradient -> soft navy bloom',
+    /linear-gradient\(160deg, transparent 0%, rgba\(255,255,255,0\.01\) 100%\)/,
+    'radial-gradient(circle at 50% 30%, rgba(20, 35, 70, 0.4) 0%, transparent 60%)'
 );
 
-fs.writeFileSync(indexCssPath, indexCss);
+// ── src/pages/Dashboard.css ───────────────────────────────────────────────
+const dash = new CssEditor('src/pages/Dashboard.css');
 
-
-const dashCssPath = 'src/pages/Dashboard.css';
-let dashCss = fs.readFileSync(dashCssPath, 'utf8');
-
-// Dashboard.css - Salient Premium Navy (Dark Mode)
-dashCss = dashCss.replace(
-  /html\.dark\s*\{[\s\S]*?--sh3:[^\n]+\n\}/,
-  `html.dark {
+dash.sub(
+    'html.dark variables -> navy palette',
+    /html\.dark\s*\{[\s\S]*?--sh3:[^\n]+\n\}/,
+    `html.dark {
   --navy:   #f8fafc;
   --navy2:  #e2e8f0;
   --navy3:  #cbd5e1;
@@ -31,7 +40,7 @@ dashCss = dashCss.replace(
   --gold2:  #e2e8f0;
   --gold-glow: rgba(255, 255, 255, 0.2);
   --bg:     transparent; /* Let the body radial gradient show through */
-  --surf:   rgba(12, 20, 38, 0.65); /* Sleek, slightly translucent dark navy panels */
+  --surf:   rgba(12, 20, 38, 0.65); /* Sleek translucent navy panels */
   --bdr:    rgba(255, 255, 255, 0.08);
   --bdr2:   rgba(255, 255, 255, 0.12);
   --txt:    #ffffff;
@@ -46,20 +55,28 @@ dashCss = dashCss.replace(
 }`
 );
 
-// We need to restore the backdrop-filter for the dark mode panels to look premium
+// Restore the frosted-glass effect on the panels.
 const glassComponents = [
-  '.ucard', '.pivot-wrap', '.dash-tabs', '.ctrl-bar', '.pivot-banner-team', '.tk-dropdown', '.dash-sidebar'
+    '.ucard', '.pivot-wrap', '.dash-tabs', '.ctrl-bar',
+    '.pivot-banner-team', '.tk-dropdown', '.dash-sidebar',
 ];
 
-glassComponents.forEach(comp => {
-  const regex = new RegExp(`(${comp.replace('.', '\\.')}\\s*\\{[^}]*)background:\\s*var\\(--surf\\);`);
-  dashCss = dashCss.replace(regex, `$1background: var(--surf);\n  backdrop-filter: blur(16px);\n  -webkit-backdrop-filter: blur(16px);`);
-});
+for (const comp of glassComponents) {
+    const escaped = comp.replace('.', '\\.');
+    dash.subUnless(
+        `${comp} backdrop blur`,
+        // Skip if this component already has a blur, so re-running the script
+        // doesn't stack a second backdrop-filter declaration on every pass.
+        new RegExp(`${escaped}\\s*\\{[^}]*backdrop-filter`),
+        new RegExp(`(${escaped}\\s*\\{[^}]*)background:\\s*var\\(--surf\\);`),
+        '$1background: var(--surf);\n  backdrop-filter: blur(16px);\n  -webkit-backdrop-filter: blur(16px);'
+    );
+}
 
-// Make headers translucent to match the premium theme
-dashCss = dashCss.replace(
-  /\.dash-hdr\{[\s\S]*?\}/,
-  `.dash-hdr{
+dash.sub(
+    'dash header -> translucent',
+    /\.dash-hdr\{[\s\S]*?\}/,
+    `.dash-hdr{
   display:flex;justify-content:space-between;align-items:center;
   height:58px;padding:0 28px;
   background: rgba(10, 15, 30, 0.85);
@@ -71,10 +88,10 @@ dashCss = dashCss.replace(
 }`
 );
 
-// Card headers should blend perfectly
-dashCss = dashCss.replace(
-  /\.ucard-hdr\{[\s\S]*?\}/,
-  `.ucard-hdr{
+dash.sub(
+    'card headers -> blended',
+    /\.ucard-hdr\{[\s\S]*?\}/,
+    `.ucard-hdr{
   display:flex;justify-content:space-between;align-items:flex-start;
   padding:16px 16px 14px;
   background: rgba(255, 255, 255, 0.03);
@@ -82,10 +99,10 @@ dashCss = dashCss.replace(
 }`
 );
 
-// Pivot banner totals
-dashCss = dashCss.replace(
-  /\.pivot-banner-total\s*\{[\s\S]*?\}/,
-  `.pivot-banner-total {
+dash.sub(
+    'pivot banner totals',
+    /\.pivot-banner-total\s*\{[\s\S]*?\}/,
+    `.pivot-banner-total {
   display:flex; flex-direction:column; align-items:center; justify-content:center;
   background: rgba(255, 255, 255, 0.05);
   border-radius:var(--r);
@@ -95,6 +112,15 @@ dashCss = dashCss.replace(
 }`
 );
 
-fs.writeFileSync(dashCssPath, dashCss);
+// ── report & save ─────────────────────────────────────────────────────────
+const clean = [index.report(), dash.report()].every(Boolean);
+index.save();
+dash.save();
 
-console.log("Salient Premium Navy theme applied!");
+if (clean) {
+    console.log('\nSalient Premium Navy theme applied.');
+} else {
+    console.error('\nSome rules did not match — the CSS has probably changed shape.');
+    console.error('Check the "NO MATCH" lines above; .bak files hold the previous version.');
+    process.exitCode = 1;
+}

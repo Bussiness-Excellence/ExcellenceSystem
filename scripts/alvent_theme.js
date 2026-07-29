@@ -1,24 +1,35 @@
-const fs = require('fs');
+/**
+ * alvent_theme.js — apply the Alvent violet dark theme.
+ *
+ * FIXED: every substitution now reports whether it matched, the files are
+ * backed up before writing, and the script is idempotent (safe to re-run).
+ * The old version printed "Alvent Violet theme applied!" even when every
+ * single regex had failed to match.
+ */
 
-const indexCssPath = 'src/index.css';
-let indexCss = fs.readFileSync(indexCssPath, 'utf8');
+const { CssEditor } = require('./css_utils');
 
-// Update index.css background to the rich violet/purple gradient (Alvent theme)
-indexCss = indexCss.replace(
-  /background:\s*radial-gradient\([^;]+;\s*background-attachment:\s*fixed;/,
-  'background: #090514; background-image: radial-gradient(circle at 15% 50%, rgba(109, 40, 217, 0.15), transparent 40%), radial-gradient(circle at 85% 30%, rgba(139, 92, 246, 0.15), transparent 40%); background-attachment: fixed;'
+console.log('Applying Alvent Violet theme...');
+
+// ── src/index.css ─────────────────────────────────────────────────────────
+const index = new CssEditor('src/index.css');
+
+index.sub(
+    'body background -> violet radial gradient',
+    /background:\s*radial-gradient\([^;]+;\s*background-attachment:\s*fixed;/,
+    'background: #090514; ' +
+    'background-image: radial-gradient(circle at 15% 50%, rgba(109, 40, 217, 0.15), transparent 40%), ' +
+    'radial-gradient(circle at 85% 30%, rgba(139, 92, 246, 0.15), transparent 40%); ' +
+    'background-attachment: fixed;'
 );
 
-fs.writeFileSync(indexCssPath, indexCss);
+// ── src/pages/Dashboard.css ───────────────────────────────────────────────
+const dash = new CssEditor('src/pages/Dashboard.css');
 
-
-const dashCssPath = 'src/pages/Dashboard.css';
-let dashCss = fs.readFileSync(dashCssPath, 'utf8');
-
-// Dashboard.css - Alvent Violet Theme
-dashCss = dashCss.replace(
-  /html\.dark\s*\{[\s\S]*?--sh3:[^\n]+\n\}/,
-  `html.dark {
+dash.sub(
+    'html.dark variables -> violet palette',
+    /html\.dark\s*\{[\s\S]*?--sh3:[^\n]+\n\}/,
+    `html.dark {
   --navy:   #f8fafc;
   --navy2:  #e2e8f0;
   --navy3:  #cbd5e1;
@@ -26,7 +37,7 @@ dashCss = dashCss.replace(
   --gold:   #a78bfa; /* Violet accent */
   --gold2:  #c4b5fd;
   --gold-glow: rgba(139, 92, 246, 0.4);
-  --bg:     transparent; 
+  --bg:     transparent;
   --surf:   rgba(20, 10, 45, 0.6); /* Deep translucent violet */
   --bdr:    rgba(139, 92, 246, 0.2);
   --bdr2:   rgba(139, 92, 246, 0.35);
@@ -42,32 +53,43 @@ dashCss = dashCss.replace(
 }`
 );
 
-// Enhance headers with glowing violet borders to match the Alvent theme
-dashCss = dashCss.replace(
-  /background:\s*rgba\(10, 15, 30, 0\.85\);/,
-  `background: rgba(15, 8, 35, 0.85);`
+dash.sub(
+    'header background -> violet tint',
+    /background:\s*rgba\(10, 15, 30, 0\.85\);/,
+    'background: rgba(15, 8, 35, 0.85);'
 );
 
-// ucard gradient background
-dashCss = dashCss.replace(
-  /\.ucard\s*\{[^}]*background:\s*var\(--surf\);[^}]*\}/g,
-  match => match.replace('background: var(--surf);', 'background: linear-gradient(180deg, rgba(25, 12, 50, 0.7) 0%, rgba(45, 20, 85, 0.4) 100%);')
+dash.sub(
+    'ucard background -> violet gradient',
+    /\.ucard\s*\{[^}]*background:\s*var\(--surf\);[^}]*\}/g,
+    match => match.replace(
+        'background: var(--surf);',
+        'background: linear-gradient(180deg, rgba(25, 12, 50, 0.7) 0%, rgba(45, 20, 85, 0.4) 100%);'
+    )
 );
 
-// ucard header transparent so gradient shows through
-dashCss = dashCss.replace(
-  /background:\s*rgba\(255, 255, 255, 0\.03\);/,
-  `background: transparent; border-bottom: 1px solid rgba(139, 92, 246, 0.15);`
+dash.sub(
+    'ucard header -> transparent with violet rule',
+    /background:\s*rgba\(255, 255, 255, 0\.03\);/,
+    'background: transparent; border-bottom: 1px solid rgba(139, 92, 246, 0.15);'
 );
 
-// Add a glowing top border to ucards to match the Alvent image style
-if (!dashCss.includes('border-top: 2px solid rgba(139, 92, 246, 0.6);')) {
-  dashCss = dashCss.replace(
+dash.subOnce(
+    'ucard glowing top border',
+    'border-top: 2px solid rgba(139, 92, 246, 0.6);',
     /\.ucard\s*\{/,
-    `.ucard {\n  border-top: 2px solid rgba(139, 92, 246, 0.6);`
-  );
+    '.ucard {\n  border-top: 2px solid rgba(139, 92, 246, 0.6);'
+);
+
+// ── report & save ─────────────────────────────────────────────────────────
+const clean = [index.report(), dash.report()].every(Boolean);
+index.save();
+dash.save();
+
+if (clean) {
+    console.log('\nAlvent Violet theme applied.');
+} else {
+    console.error('\nSome rules did not match — the CSS has probably changed shape.');
+    console.error('Check the "NO MATCH" lines above; .bak files hold the previous version.');
+    process.exitCode = 1;
 }
-
-fs.writeFileSync(dashCssPath, dashCss);
-
-console.log("Alvent Violet theme applied!");

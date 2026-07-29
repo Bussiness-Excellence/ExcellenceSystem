@@ -1,12 +1,30 @@
+/**
+ * generate_hierarchy_sql.js — produce a transactional SQL file that replaces
+ * the `hierarchy` table, for pasting into the Supabase SQL editor.
+ *
+ * FIXED:
+ *  - Service-role key no longer hardcoded; read from .env via config.js.
+ *    (It is only used here to look up team IDs — a read.)
+ *  - Input and output paths are configurable via .env or argv.
+ *  - Duplicate employee codes are detected and reported instead of producing
+ *    a SQL file that violates a unique constraint halfway through.
+ *  - Aborts on an empty spreadsheet rather than emitting a file whose only
+ *    effect is "DELETE FROM hierarchy".
+ *
+ * The generated SQL is wrapped in BEGIN/COMMIT, so unlike a chunked REST
+ * delete-then-insert it either fully applies or fully rolls back.
+ */
+
 const fs = require('fs');
+const path = require('path');
 const xlsx = require('xlsx');
-const { createClient } = require('@supabase/supabase-js');
+const { getServiceClient, envPath } = require('./config');
 
-const supabaseUrl = 'https://xxbfwvlqixnmonxytdxq.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4YmZ3dmxxaXhubW9ueHl0ZHhxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4Mjc1NjE2NSwiZXhwIjoyMDk4MzMyMTY1fQ.PSk6RyFmg_OFTcCtYO74AeJj6wT4FGZS2K2JT9GEJ_A';
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = getServiceClient();
 
-const cleanStr = v => (v === null || v === undefined || v === '' || v === 'NaN') ? null : String(v).trim();
+const cleanStr = v =>
+    (v === null || v === undefined || v === '' || v === 'NaN') ? null : String(v).trim();
+
 const cleanCode = v => {
     let s = cleanStr(v);
     if (!s) return null;
@@ -14,91 +32,147 @@ const cleanCode = v => {
     return s;
 };
 
+/** Quote a value for SQL, doubling embedded single quotes. */
 const escSql = v => {
     if (v === null || v === undefined) return 'NULL';
     return "'" + String(v).replace(/'/g, "''") + "'";
 };
 
 async function generateSQL() {
-    const filePath = 'E:\\crm extractor\\hierarchy\\hierarchy_export.xlsx';
-    console.log(`Reading ${filePath}...`);
+    const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+    const filePath = args[0] || envPath('HIERARCHY_FILE', 'E:\\crm extractor\\hierarchy\\hierarchy_export.xlsx');
+    const outPath = args[1] || envPath('HIERARCHY_SQL_OUT', 'E:\\crm extractor\\hierarchy\\hierarchy_replace.sql');
 
+    console.log(`Reading ${filePath}...`);
     if (!fs.existsSync(filePath)) {
         console.error(`File not found: ${filePath}`);
+        console.error('Set HIERARCHY_FILE in .env or pass the path as the first argument.');
+        process.exitCode = 1;
         return;
     }
 
-    const wb = xlsx.readFile(filePath);
-    const sheetName = wb.SheetNames[0];
-    const data = xlsx.utils.sheet_to_json(wb.Sheets[sheetName], { defval: null });
+    let data;
+    try {
+        const wb = xlsx.readFile(filePath);
+        data = xlsx.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null });
+    } catch (err) {
+        console.error(`Could not read the workbook: ${err.message}`);
+        process.exitCode = 1;
+        return;
+    }
 
-    if (data.length === 0) {
-        console.log("No data found in the Excel file.");
+    if (!data.length) {
+        console.error('No data found in the Excel file — refusing to generate a delete-only script.');
+        process.exitCode = 1;
         return;
     }
 
     console.log(`Found ${data.length} records in Excel.`);
     console.log(`Excel columns: ${Object.keys(data[0]).join(', ')}`);
 
-    // --- Fetch the teams table to map team names -> team IDs ---
-    console.log("\nFetching teams table from Supabase...");
-    const { data: teams, error: teamsErr } = await supabase.from('teams').select('*');
+    // --- team name -> id --------------------------------------------------
+    console.log('\nFetching teams table from Supabase...');
+    const { data: teams, error: teamsErr } = await supabase.from('teams').select('id,name');
     if (teamsErr) {
-        console.error("Error fetching teams:", teamsErr);
+        console.error('Error fetching teams:', teamsErr.message);
+        process.exitCode = 1;
         return;
     }
     const teamNameToId = {};
     for (const t of teams) {
-        teamNameToId[t.name?.toLowerCase()] = t.id;
+        if (t.name) teamNameToId[t.name.toLowerCase()] = t.id;
     }
     console.log(`Found ${teams.length} teams: ${teams.map(t => `${t.name} (id=${t.id})`).join(', ')}`);
 
-    // --- Map Excel data ---
-    const records = data.map(row => {
+    // --- map rows ---------------------------------------------------------
+    const seen = new Set();
+    const duplicates = [];
+    const records = [];
+
+    for (const row of data) {
         const empCode = cleanCode(row['employee_code'] || row['Employee Code'] || row['Employee_Code']);
-        const empName = cleanStr(row['employee_name'] || row['Employee Name'] || row['Employee_Name']);
-        const role = cleanStr(row['role'] || row['Role']);
-        const supervisorName = cleanStr(row['supervisor_name'] || row['Supervisor Name'] || row['Supervisor_Name']);
-        const areaManagerName = cleanStr(row['area_manager_name'] || row['Area Manager Name'] || row['Area_Manager_Name']);
+        if (!empCode) continue;
+        if (seen.has(empCode)) {
+            duplicates.push(empCode);
+            continue;
+        }
+        seen.add(empCode);
+
         const teamName = cleanStr(row['team'] || row['Team'] || row['team_name'] || row['Team Name']);
-        const teamId = teamName ? (teamNameToId[teamName.toLowerCase()] || null) : null;
-
-        return { employee_code: empCode, employee_name: empName, role, supervisor_name: supervisorName, area_manager_name: areaManagerName, team_id: teamId, _team_name: teamName };
-    }).filter(r => r.employee_code);
-
-    // Check unmapped teams
-    const unmappedTeams = [...new Set(records.filter(r => r._team_name && !r.team_id).map(r => r._team_name))];
-    if (unmappedTeams.length > 0) {
-        console.warn(`\n⚠️  WARNING: These team names don't match any team in Supabase:`);
-        unmappedTeams.forEach(t => console.warn(`   - "${t}"`));
+        records.push({
+            employee_code: empCode,
+            employee_name: cleanStr(row['employee_name'] || row['Employee Name'] || row['Employee_Name']),
+            role: cleanStr(row['role'] || row['Role']),
+            supervisor_name: cleanStr(row['supervisor_name'] || row['Supervisor Name'] || row['Supervisor_Name']),
+            area_manager_name: cleanStr(row['area_manager_name'] || row['Area Manager Name'] || row['Area_Manager_Name']),
+            team_id: teamName ? (teamNameToId[teamName.toLowerCase()] ?? null) : null,
+            _team_name: teamName,
+        });
     }
 
-    // --- Generate SQL ---
-    let sql = '-- ===================================================\n';
-    sql += '-- Hierarchy replacement SQL\n';
-    sql += `-- Generated: ${new Date().toISOString()}\n`;
-    sql += `-- Source: hierarchy_export.xlsx (${records.length} records)\n`;
-    sql += '-- ===================================================\n\n';
-    sql += 'BEGIN;\n\n';
-    sql += '-- Step 1: Delete all existing hierarchy rows\n';
-    sql += 'DELETE FROM hierarchy;\n\n';
-    sql += '-- Step 2: Insert new hierarchy data\n';
-    sql += 'INSERT INTO hierarchy (employee_code, employee_name, role, supervisor_name, area_manager_name, team_id)\nVALUES\n';
+    if (duplicates.length) {
+        console.warn(`\nWARNING: ${duplicates.length} duplicate employee_code(s); kept the first of each:`);
+        [...new Set(duplicates)].forEach(c => console.warn(`   - ${c}`));
+    }
 
-    const valueRows = records.map(r => {
-        return `  (${escSql(r.employee_code)}, ${escSql(r.employee_name)}, ${escSql(r.role)}, ${escSql(r.supervisor_name)}, ${escSql(r.area_manager_name)}, ${r.team_id !== null ? r.team_id : 'NULL'})`;
-    });
+    const unmappedTeams = [...new Set(records.filter(r => r._team_name && !r.team_id).map(r => r._team_name))];
+    if (unmappedTeams.length) {
+        console.warn(`\nWARNING: these team names don't match any team in Supabase:`);
+        unmappedTeams.forEach(t => console.warn(`   - "${t}"`));
+        console.warn('   They will be written with team_id = NULL.');
+    }
 
-    sql += valueRows.join(',\n');
-    sql += ';\n\n';
-    sql += 'COMMIT;\n';
+    if (!records.length) {
+        console.error('\nNo rows had an employee_code — nothing to generate.');
+        process.exitCode = 1;
+        return;
+    }
 
-    // Write SQL file
-    const outPath = 'E:\\crm extractor\\hierarchy\\hierarchy_replace.sql';
-    fs.writeFileSync(outPath, sql, 'utf8');
-    console.log(`\n✅ SQL file written to: ${outPath}`);
+    // --- build SQL --------------------------------------------------------
+    const valueRows = records.map(r =>
+        `  (${escSql(r.employee_code)}, ${escSql(r.employee_name)}, ${escSql(r.role)}, ` +
+        `${escSql(r.supervisor_name)}, ${escSql(r.area_manager_name)}, ` +
+        `${r.team_id !== null ? r.team_id : 'NULL'})`
+    );
+
+    const sql =
+        '-- ===================================================\n' +
+        '-- Hierarchy replacement SQL\n' +
+        `-- Generated: ${new Date().toISOString()}\n` +
+        `-- Source: ${path.basename(filePath)} (${records.length} records)\n` +
+        '--\n' +
+        '-- Wrapped in a transaction: if any row fails, the whole thing rolls\n' +
+        '-- back and the existing hierarchy is left intact.\n' +
+        '-- ===================================================\n\n' +
+        'BEGIN;\n\n' +
+        '-- Step 1: Delete all existing hierarchy rows\n' +
+        'DELETE FROM hierarchy;\n\n' +
+        '-- Step 2: Insert new hierarchy data\n' +
+        'INSERT INTO hierarchy (employee_code, employee_name, role, supervisor_name, area_manager_name, team_id)\nVALUES\n' +
+        valueRows.join(',\n') + ';\n\n' +
+        '-- Step 3: Sanity check — rolls back if the row count looks wrong\n' +
+        'DO $$\nDECLARE n integer;\nBEGIN\n' +
+        '  SELECT count(*) INTO n FROM hierarchy;\n' +
+        `  IF n <> ${records.length} THEN\n` +
+        `    RAISE EXCEPTION 'Expected ${records.length} rows, found %', n;\n` +
+        '  END IF;\nEND $$;\n\n' +
+        'COMMIT;\n';
+
+    try {
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        fs.writeFileSync(outPath, sql, 'utf8');
+    } catch (err) {
+        console.error(`Could not write ${outPath}: ${err.message}`);
+        process.exitCode = 1;
+        return;
+    }
+
+    console.log(`\nSQL file written to: ${outPath}`);
     console.log(`   ${records.length} INSERT rows generated.`);
-    console.log(`\n📋 Copy the contents of that file and paste into the Supabase SQL Editor to run it.`);
+    console.log(`\nCopy the contents of that file into the Supabase SQL Editor and run it.`);
 }
 
-generateSQL().catch(console.error);
+generateSQL().catch(err => {
+    console.error('Unexpected failure:', err);
+    process.exitCode = 1;
+});
