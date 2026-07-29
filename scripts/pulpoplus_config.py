@@ -224,3 +224,79 @@ def wait_until_stable(path, checks=3, interval=1.0, timeout=60):
         time.sleep(interval)
         waited += interval
     return False
+
+
+# ── time parsing ───────────────────────────────────────────────────────────
+
+_TIME_FORMATS = ("%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M%p", "%I%p")
+
+
+def parse_time_minutes(value):
+    """Parse a clock time into minutes since midnight, or None.
+
+    Each side is parsed independently. The previous implementation looped
+    over formats and required BOTH times to match the SAME format, so
+    comparing '09:30' with '09:45:00' fell through every branch and returned
+    a sentinel meaning "far apart" — silently dropping genuine matches in the
+    coaching-day accompaniment check.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.hour * 60 + value.minute
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "nat", "none"}:
+        return None
+    # '2026-07-01 09:30:00' -> '09:30:00'
+    if " " in s and "-" in s.split(" ")[0]:
+        s = s.split(" ", 1)[1].strip()
+    s = s.upper().replace(".", "")
+    for fmt in _TIME_FORMATS:
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.hour * 60 + dt.minute
+        except ValueError:
+            continue
+    return None
+
+
+def minutes_between(t1, t2, unparseable=999):
+    """Absolute minutes between two clock times.
+
+    Returns `unparseable` (a deliberately large sentinel) if either side
+    can't be read, so a missing time reads as "far apart" rather than
+    accidentally counting as a match.
+    """
+    a = parse_time_minutes(t1)
+    b = parse_time_minutes(t2)
+    if a is None or b is None:
+        return unparseable
+    return abs(b - a)
+
+
+def sort_times(times):
+    """Chronological sort of clock-time strings.
+
+    sorted() on raw strings is LEXICOGRAPHIC: ['9:30','10:15'] sorts to
+    ['10:15','9:30'], and '2:00 PM' sorts before '9:30 AM'. Shift start/end
+    were read off sorted()[0] and [-1], so any unpadded or 12-hour time made
+    the duration and the average start time wrong.
+    """
+    return sorted(times, key=lambda t: (parse_time_minutes(t) is None,
+                                        parse_time_minutes(t) or 0,
+                                        str(t)))
+
+
+def fmt_hm(total_minutes):
+    """Format minutes as 'h:mm'. Negative or invalid input clamps to '0:00'.
+
+    The old version used floor division on negatives, so -30 rendered as
+    '-1:30' instead of '0:00'.
+    """
+    try:
+        total = float(total_minutes)
+    except (TypeError, ValueError):
+        return "0:00"
+    if total != total or total < 0:  # NaN or negative
+        return "0:00"
+    return f"{int(total // 60)}:{int(total % 60):02d}"

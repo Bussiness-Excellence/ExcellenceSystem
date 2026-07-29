@@ -32,15 +32,26 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import argparse
+
+# Load .env so PULPO_* / SUPABASE_* are available below.
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+try:
+    from pulpoplus_config import _load_dotenv as _pp_load_dotenv
+    _pp_load_dotenv()
+except Exception:
+    pass
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-LOGIN_URL = "https://pulpo-eipico.cloud/crm/"
-USERNAME = "be"
-PASSWORD = "1234"
+# Credentials come from .env (see .env.example) — never hardcode them here.
+# These previously sat in plaintext in this file, which is pushed to GitHub.
+LOGIN_URL = os.environ.get("PULPO_LOGIN_URL", "https://pulpo-eipico.cloud/crm/")
+USERNAME = os.environ.get("PULPO_USERNAME", "")
+PASSWORD = os.environ.get("PULPO_PASSWORD", "")
 
 # Maps the raw code/text found in the "Acc. Type" column to a normalized
 # category. IMPORTANT: run once with --debug first -- the script will print
@@ -266,12 +277,34 @@ def login(driver, max_attempts=3):
         time.sleep(2)
 
         inputs = driver.find_elements(By.TAG_NAME, "input")
-        if len(inputs) >= 2:
-            inputs[0].send_keys(USERNAME)
-            inputs[1].send_keys(PASSWORD)
-            inputs[1].send_keys(Keys.RETURN)
+        if len(inputs) < 2:
+            # The old code fell through here and still printed "Login
+            # successful", so a changed login page looked like a success and
+            # failed confusingly much later in the run.
+            print(f"❌ Login failed: expected 2+ input fields, found {len(inputs)}")
+            print("   The login page layout has probably changed.")
+            return False
 
+        inputs[0].send_keys(USERNAME)
+        inputs[1].send_keys(PASSWORD)
+        inputs[1].send_keys(Keys.RETURN)
         time.sleep(5)
+
+        # Verify we actually got in, rather than assuming it worked.
+        still_on_login = False
+        try:
+            remaining = driver.find_elements(By.TAG_NAME, "input")
+            pw_fields = [i for i in remaining
+                         if (i.get_attribute("type") or "").lower() == "password"]
+            still_on_login = bool(pw_fields and pw_fields[0].is_displayed())
+        except Exception:
+            pass
+
+        if still_on_login:
+            print("❌ Login failed: still on the login page (wrong credentials?)")
+            print("   Check PULPO_USERNAME / PULPO_PASSWORD in your .env file.")
+            return False
+
         print("✓ Login successful")
         return True
     except Exception as e:
@@ -1440,12 +1473,13 @@ def backfill_territory(all_records, debug=False):
 # PER-USER KPI SUMMARY
 # ============================================================
 
-def minutes_between(t1, t2):
-    """t1, t2 are 'HH:MM' strings. Returns absolute difference in minutes."""
-    fmt = "%H:%M"
-    d1 = datetime.strptime(t1, fmt)
-    d2 = datetime.strptime(t2, fmt)
-    return abs((d2 - d1).total_seconds()) / 60.0
+# minutes_between / sort_times now come from pulpoplus_config.
+#
+# The old version here called strptime with a single "%H:%M" format and NO
+# error handling, so one value in "9:30", "09:30:00" or "2:00 PM" form raised
+# ValueError and killed the whole extraction run mid-way. It also only ever
+# understood zero-padded 24-hour times.
+from pulpoplus_config import minutes_between, sort_times  # noqa: E402,F401
 
 
 def identify_managers(all_records):
@@ -1739,7 +1773,10 @@ def compute_summary(all_records, debug=False, managers=None, coaching_days_by_ma
                     by_day_times[r["date"]].append(r["time"])
             daily_durations = []
             for date, times in by_day_times.items():
-                times_sorted = sorted(times)
+                # sort_times, not sorted(): raw string order is lexicographic,
+                # so '10:15' sorts before '9:30' and the shift start/end are
+                # read off the wrong rows.
+                times_sorted = sort_times(times)
                 if len(times_sorted) >= 2:
                     daily_durations.append(minutes_between(times_sorted[0], times_sorted[-1]))
                 else:
@@ -1763,7 +1800,7 @@ def compute_summary(all_records, debug=False, managers=None, coaching_days_by_ma
                     by_day_times[r["date"]].append(r["time"])
             first_visit_minutes = []
             for date, times in by_day_times.items():
-                first_time = sorted(times)[0]
+                first_time = sort_times(times)[0]
                 try:
                     dt = datetime.strptime(first_time, "%H:%M")
                     first_visit_minutes.append(dt.hour * 60 + dt.minute)
@@ -2065,6 +2102,10 @@ def main():
     all_records = []
 
     try:
+        if not USERNAME or not PASSWORD:
+            print("❌ PULPO_USERNAME / PULPO_PASSWORD are not set.")
+            print("   Copy .env.example to .env and fill them in.")
+            return
         if not login(driver):
             return
 

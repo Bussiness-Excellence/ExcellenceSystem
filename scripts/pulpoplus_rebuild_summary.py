@@ -140,21 +140,17 @@ def parse_members(raw):
     return [n.strip() for n in str(raw).split(",") if n.strip() and n.strip().lower() != "nan"]
 
 
-def minutes_between(t1, t2):
-    for fmt in ("%H:%M:%S", "%H:%M", "%I:%M %p", "%I:%M:%S %p"):
-        try:
-            a = datetime.strptime(t1.strip(), fmt)
-            b = datetime.strptime(t2.strip(), fmt)
-            return abs((b - a).total_seconds() / 60)
-        except Exception:
-            continue
-    return 999
-
-
-def fmt_hm(total_minutes):
-    h = int(total_minutes // 60)
-    m = int(total_minutes % 60)
-    return f"{h}:{m:02d}"
+# minutes_between / sort_times / fmt_hm now live in pulpoplus_config.
+#
+#  - the old minutes_between required BOTH times to match the SAME format,
+#    so '09:30' vs '09:45:00' returned the "far apart" sentinel and silently
+#    dropped genuine matches in the coaching-day check;
+#  - the old fmt_hm floor-divided negatives, rendering -30 as '-1:30';
+#  - sort_times replaces sorted() on raw time strings, which is
+#    LEXICOGRAPHIC: ['9:30','10:15'] sorted to ['10:15','9:30'], corrupting
+#    every shift duration and average start time built from unpadded or
+#    12-hour clock values.
+from pulpoplus_config import minutes_between, sort_times, fmt_hm  # noqa: E402,F401
 
 
 # ── load & normalise raw data ─────────────────────────────────────────────────
@@ -297,13 +293,72 @@ def backfill_territory(records, debug=False):
 
 # ── manager identification ────────────────────────────────────────────────────
 
-def identify_managers(records):
+MANAGER_ROLES = {"BLM", "AM", "AREA MANAGER", "DM", "DISTRICT MANAGER",
+                 "SUPERVISOR", "MANAGER", "LINE MANAGER"}
+
+
+def identify_managers(records, hmap=None):
+    """Users treated as managers/coaches.
+
+    The heuristic is "spans more than one territory". It is load-bearing:
+    anyone flagged here is excluded from rep visit totals and from coaching
+    de-duplication, so a misclassification silently reshapes Total Visits,
+    AM/PM Calls and Coaching Days for that person.
+
+    Two known ways it misfires:
+      - a rep who transfers territory mid-period is promoted to "manager"
+        and drops out of the rep numbers entirely;
+      - a manager who only ever worked one territory in the period is not
+        detected, so their coaching days are never counted.
+
+    When a hierarchy file is loaded the roles in it are authoritative, and
+    disagreements are reported rather than silently accepted.
+    """
     territories_by_user = defaultdict(set)
     for r in records:
         t = r["territory"]
         if t and t.lower() not in ACC_TYPE_LABELS_LOWER:
             territories_by_user[r["user"]].add(t)
-    return {u for u, terrs in territories_by_user.items() if len(terrs) > 1}
+    heuristic = {u for u, terrs in territories_by_user.items() if len(terrs) > 1}
+
+    if hmap is None:
+        return heuristic
+
+    # Cross-check against the org chart.
+    by_role = {}
+    for e in getattr(hmap, "all_employees", []):
+        if e.name:
+            by_role[e.name] = (e.role or "").strip().upper()
+
+    from_hierarchy = {n for n, role in by_role.items() if role in MANAGER_ROLES}
+
+    known = set(by_role)
+    false_positives = sorted((heuristic - from_hierarchy) & known)
+    false_negatives = sorted(
+        n for n in (from_hierarchy - heuristic)
+        if n in territories_by_user
+    )
+
+    if false_positives:
+        print(f"  ! {len(false_positives)} user(s) span multiple territories but are "
+              f"not managers in the hierarchy — treating them as REPS:")
+        for n in false_positives[:10]:
+            print(f"      {n} ({by_role[n] or 'no role'}) — territories: "
+                  f"{', '.join(sorted(territories_by_user[n]))}")
+        if len(false_positives) > 10:
+            print(f"      ... and {len(false_positives) - 10} more")
+
+    if false_negatives:
+        print(f"  ! {len(false_negatives)} manager(s) in the hierarchy worked only one "
+              f"territory — treating them as MANAGERS:")
+        for n in false_negatives[:10]:
+            print(f"      {n} ({by_role[n]})")
+        if len(false_negatives) > 10:
+            print(f"      ... and {len(false_negatives) - 10} more")
+
+    # Hierarchy wins for anyone it knows about; the heuristic still covers
+    # people missing from the org chart.
+    return (heuristic - known) | from_hierarchy
 
 
 # ── coaching days ─────────────────────────────────────────────────────────────
@@ -348,15 +403,29 @@ def compute_coaching_days(records, managers, debug=False):
     # accompanied[(manager, rep, date)][shift] = count of rep visits that shift
     # the manager was present for.
     accompanied = defaultdict(lambda: {"AM": 0, "PM": 0})
+    missing_time_matches = [0]  # counted so the weaker signal is visible
     for (rep, date, shift), visits in rep_visits.items():
         for r in visits:
             matched_managers = {m for m in r["members"] if m in managers and m != rep}
             if r["acc_id"]:
                 for m_user, m_time in mgr_visits_idx.get((date, shift, r["acc_id"]), []):
-                    if not m_time or not r["time"] or minutes_between(m_time, r["time"]) <= COACHING_TIME_TOLERANCE_MINUTES:
+                    # Previously a missing timestamp on either side counted as
+                    # "accompanied" automatically, so gaps in the export
+                    # inflated coaching days. Same account + same date + same
+                    # shift is still strong evidence, so that alone still
+                    # counts; what no longer happens is a missing time being
+                    # treated as a *confirmed* time match.
+                    if not m_time or not r["time"]:
+                        matched_managers.add(m_user)
+                        missing_time_matches[0] += 1
+                    elif minutes_between(m_time, r["time"]) <= COACHING_TIME_TOLERANCE_MINUTES:
                         matched_managers.add(m_user)
             for m in matched_managers:
                 accompanied[(m, rep, date)][shift] += 1
+
+    if missing_time_matches[0]:
+        print(f"  ! {missing_time_matches[0]} accompaniment match(es) had no timestamp "
+              f"and were matched on account/date/shift alone")
 
     rep_shift_totals = {key: len(visits) for key, visits in rep_visits.items()}
     team_by_user = team_by_user_map(records)
@@ -370,11 +439,12 @@ def compute_coaching_days(records, managers, debug=False):
         am_acc, pm_acc = acc["AM"], acc["PM"]
         am_ratio = (am_acc / am_total) if am_total else None
         pm_ratio = (pm_acc / pm_total) if pm_total else None
-        am_ok = am_ratio is not None and am_ratio >= COACHING_ACCOMPANIMENT_THRESHOLD
-        pm_ok = pm_ratio is not None and pm_ratio >= COACHING_ACCOMPANIMENT_THRESHOLD
+        # Coaching day now requires at least 1 matched visit in both shifts (no 80% rule)
+        am_ok = am_acc > 0
+        pm_ok = pm_acc > 0
 
         # A full coaching day requires the rep to have worked BOTH shifts
-        # that day, with the manager accompanying at least 80% of each.
+        # that day, with the manager accompanying at least 1 visit in each.
         # A rep with 0 visits in one shift can no longer get a free pass —
         # that's just a single-shift double visit, not a coaching day.
         is_coaching = am_total > 0 and pm_total > 0 and am_ok and pm_ok
@@ -513,9 +583,10 @@ def _compute_user_row(user, user_records, team_by_user, managers,
                 by_day[r["date"]].append(r["time"])
         durations = []
         for _, times in by_day.items():
-            times_sorted = sorted(times)
+            times_sorted = sort_times(times)
             if len(times_sorted) >= 2:
-                durations.append(minutes_between(times_sorted[0], times_sorted[-1]))
+                span = minutes_between(times_sorted[0], times_sorted[-1], unparseable=0)
+                durations.append(span)
             else:
                 durations.append(0.0)
         return durations  # one value per day present in this slice
@@ -533,7 +604,8 @@ def _compute_user_row(user, user_records, team_by_user, managers,
     # AM average start time
     am_start_times = []
     for date_key in am_shift_dates:
-        day_times = sorted(r["time"] for r in am_records if r["date"] == date_key and r["time"])
+        day_times = sort_times([r["time"] for r in am_records
+                                if r["date"] == date_key and r["time"]])
         if day_times:
             am_start_times.append(day_times[0])
     am_avg_start_time = ""
@@ -837,6 +909,8 @@ def compute_product_calls(records):
 HEADER_FILL   = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT   = Font(color="FFFFFF", bold=True, size=10)
 ALT_FILL      = PatternFill("solid", fgColor="EBF3FB")
+WARN_FILL     = PatternFill("solid", fgColor="FFC7CE")  # Light red for <100%
+WARN_FONT     = Font(color="9C0006")                    # Dark red text
 BORDER_SIDE   = Side(style="thin", color="BDD7EE")
 CELL_BORDER   = Border(left=BORDER_SIDE, right=BORDER_SIDE,
                        top=BORDER_SIDE,  bottom=BORDER_SIDE)
@@ -845,9 +919,15 @@ LEFT          = Alignment(horizontal="left",   vertical="center", wrap_text=True
 
 
 def style_worksheet(ws, num_data_rows, num_cols, freeze_cell="A2"):
+    header_names = {}
+    for col_idx in range(1, num_cols + 1):
+        header_names[col_idx] = str(ws.cell(row=1, column=col_idx).value or "")
+
     for col_idx in range(1, num_cols + 1):
         col_letter = get_column_letter(col_idx)
         max_len = 0
+        is_pct_col = header_names[col_idx] in ("AM %", "PM %")
+        
         for row_idx in range(1, num_data_rows + 2):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.border = CELL_BORDER
@@ -856,9 +936,14 @@ def style_worksheet(ws, num_data_rows, num_cols, freeze_cell="A2"):
                 cell.font = HEADER_FONT
                 cell.alignment = CENTER
             else:
-                if row_idx % 2 == 0:
+                # Highlight % less than 100 with warning colors
+                if is_pct_col and isinstance(cell.value, (int, float)) and cell.value < 100:
+                    cell.fill = WARN_FILL
+                    cell.font = WARN_FONT
+                elif row_idx % 2 == 0:
                     cell.fill = ALT_FILL
                 cell.alignment = LEFT
+                
             val = str(cell.value) if cell.value is not None else ""
             max_len = max(max_len, len(val))
         ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 45)
@@ -1072,7 +1157,9 @@ def main():
     backfill_territory(records, debug=args.debug)
 
     print("\n👔 Identifying managers...")
-    managers = identify_managers(records)
+    # Pass the org chart so hierarchy roles override the territory heuristic
+    # and any disagreement is reported instead of silently applied.
+    managers = identify_managers(records, hmap=hmap)
     print(f"   Managers found ({len(managers)}): {sorted(managers)}")
 
     print("\n🤝 Computing coaching days...")

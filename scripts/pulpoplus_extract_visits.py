@@ -120,8 +120,36 @@ def _all_sections(data):
     return sections
 
 
+_HEADER_WORDS = ("territory", "acc. type", "acc type", "doctor", "specialty",
+                 "classification", "products", "members", "date", "visit type",
+                 "notes", "feedback", "pharmacy", "activity", "event")
+
+
+def _looks_like_header(row_html):
+    """True if this <tr> is a header rather than a data row."""
+    if "<th" in row_html.lower():
+        return True
+    cells = [_clean_cell(c).lower() for c in _cellsplit(row_html)]
+    filled = [c for c in cells if c]
+    if not filled:
+        return False
+    hits = sum(1 for c in filled if any(w in c for w in _HEADER_WORDS))
+    return hits >= max(2, len(filled) // 3)
+
+
 def _rows_of(section_html):
-    return [r for r in section_html.split("<tr") if "<td" in r][1:]
+    """Data rows of a section, with any leading header row removed.
+
+    The old version did an unconditional [1:] on every row containing a
+    <td>. Header cells are usually <th>, so they were already excluded by
+    that filter — meaning the [1:] silently discarded the FIRST REAL DATA
+    ROW of every section. Now the first row is only dropped if it actually
+    looks like a header.
+    """
+    rows = [r for r in section_html.split("<tr") if "<td" in r]
+    if rows and _looks_like_header(rows[0]):
+        return rows[1:]
+    return rows
 
 
 # ── per-section row builders ──────────────────────────────────────────────────
@@ -178,8 +206,13 @@ def _parse_visits_section(rows, team, owner, records, debug, label="Visits"):
         }
         _emit(records, base, members, owner)
 
-    if debug:
-        print(f"  {label}: {len(rows)} rows parsed, {skipped} skipped (malformed)")
+    # Skipped rows used to be reported only under --debug, so a column-count
+    # change in the export dropped records with no visible sign.
+    if skipped:
+        print(f"  ! {label}: {skipped} of {len(rows)} row(s) skipped — "
+              f"unexpected column count (export format may have changed)")
+    elif debug:
+        print(f"  {label}: {len(rows)} rows parsed, 0 skipped")
     return len(rows)
 
 
@@ -218,8 +251,11 @@ def _parse_pharmacy_section(rows, team, owner, records, debug):
         }
         _emit(records, base, members, owner)
 
-    if debug:
-        print(f"  Pharmacies Visits: {len(rows)} rows parsed, {skipped} skipped (malformed)")
+    if skipped:
+        print(f"  ! Pharmacies Visits: {skipped} of {len(rows)} row(s) skipped — "
+              f"unexpected column count (export format may have changed)")
+    elif debug:
+        print(f"  Pharmacies Visits: {len(rows)} rows parsed, 0 skipped")
     return len(rows)
 
 
@@ -246,8 +282,13 @@ def _parse_ow_activity_section(rows, team, owner, records, debug, acc_type_raw, 
         }
         _emit(records, base, members, owner)
 
-    if debug:
-        print(f"  {label}: {len(rows)} rows parsed, {skipped} skipped (malformed)")
+    # Skipped rows used to be reported only under --debug, so a column-count
+    # change in the export dropped records with no visible sign.
+    if skipped:
+        print(f"  ! {label}: {skipped} of {len(rows)} row(s) skipped — "
+              f"unexpected column count (export format may have changed)")
+    elif debug:
+        print(f"  {label}: {len(rows)} rows parsed, 0 skipped")
     return len(rows)
 
 
@@ -275,8 +316,11 @@ def _parse_events_section(rows, team, owner, records, debug):
         }
         _emit(records, base, [member] if member else [], owner or member)
 
-    if debug:
-        print(f"  Events: {len(rows)} rows parsed, {skipped} skipped (malformed)")
+    if skipped:
+        print(f"  ! Events: {skipped} of {len(rows)} row(s) skipped — "
+              f"unexpected column count (export format may have changed)")
+    elif debug:
+        print(f"  Events: {len(rows)} rows parsed, 0 skipped")
     return len(rows)
 
 

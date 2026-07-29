@@ -4,7 +4,7 @@
 
 ## READ THIS FIRST: rotate your keys
 
-Four files contained live Supabase credentials in plaintext:
+Five files contained live credentials in plaintext:
 
 | File | Key that was exposed |
 |---|---|
@@ -13,7 +13,13 @@ Four files contained live Supabase credentials in plaintext:
 | `update_hierarchy.js` | `service_role` JWT |
 | `pulpoplus_upload_to_supabase.py` | `sb_secret_…` (in `_supabase_config()` **and** in the docstring) |
 
+| `pulpoplus_extractor_summary.py` | **PulpoPlus CRM login** — URL, username and password |
+
 `push_hierarchy.py` and `inspect_data.py` also carried a publishable key.
+
+That last one is the worst of the set: it is the login to the CRM system
+itself, in plaintext, in a repo you push to GitHub. Change that password in
+PulpoPlus, not just in the file.
 
 The `service_role` key bypasses Row Level Security completely — it is the
 database equivalent of a root password. You push this project to GitHub, so
@@ -23,6 +29,7 @@ assume both secrets are public.
 
 1. Supabase dashboard → Settings → API → rotate the `service_role` key
    (and the publishable key).
+1a. Change the PulpoPlus CRM account password.
 2. Copy `.env.example` to `.env` and paste the **new** keys in.
 3. Confirm `.env` is ignored: `git check-ignore -v .env` should print a match.
 4. Rotating does not erase the old key from git history. To purge it, use
@@ -200,21 +207,137 @@ declarations.
 
 ---
 
-## Not changed
+## Second pass: the four extractor / rebuild files
 
-`pulpoplus_extract_visits.py`, `pulpoplus_extractor_summary.py`,
-`pulpoplus_hierarchy.py`, `pulpoplus_rebuild_summary.py` and
-`generate_docs.py` are unmodified — no credentials and no bugs found in the
-areas reviewed. Their business logic (dedup rules, shift calculations,
-coaching-day matching) wasn't audited; that would need sample data to verify
-against.
+These were unreviewed in the first bundle. Auditing them turned up the
+credential leak above plus six more defects.
+
+### Time comparison silently failed on mixed formats
+
+`minutes_between()` looped over format strings and required **both** times to
+parse with the **same** one:
+
+```
+'09:30'    vs '09:45'       -> 15    ok
+'09:30'    vs '09:45:00'    -> 999   WRONG
+'09:30'    vs '10:00 AM'    -> 999   WRONG
+```
+
+999 is the "too far apart" sentinel, so genuinely matching visits were read as
+unrelated. This feeds the coaching-day accompaniment check directly — real
+coaching days were being dropped whenever the export mixed time formats.
+
+The copy in `pulpoplus_extractor_summary.py` was worse: a bare `strptime` with
+`"%H:%M"` and **no** try/except, so one `"9:30 AM"` value raised `ValueError`
+and killed the whole extraction run.
+
+Both now use a shared helper that parses each side independently.
+
+### Shift durations and start times used a lexicographic sort
+
+`sorted(times)` on raw strings is alphabetical, not chronological:
+
+```
+['9:30', '10:15', '14:00']         -> ['10:15', '14:00', '9:30']
+['9:30 AM', '11:00 AM', '2:00 PM'] -> ['11:00 AM', '2:00 PM', '9:30 AM']
+```
+
+The code takes `sorted(times)[0]` and `[-1]` as the shift's start and end. With
+any unpadded or 12-hour value, it picked the wrong endpoints — so **Avg AM/PM
+Shift Duration and Avg AM Starting Time were wrong**. Zero-padded 24-hour times
+happen to sort correctly, which is why this held up as long as it did.
+
+Replaced with a `sort_times()` that sorts by parsed minutes.
+
+### Coaching accompaniment failed open on missing timestamps
+
+```python
+if not m_time or not r["time"] or minutes_between(...) <= TOLERANCE:
+    matched_managers.add(m_user)
+```
+
+A missing timestamp on either side counted as a **confirmed** time match, so
+gaps in the export inflated coaching days. Same account + date + shift is still
+treated as evidence, but those matches are now counted and reported separately
+rather than being indistinguishable from verified ones.
+
+### `_rows_of()` discarded the first data row of every section
+
+```python
+return [r for r in section_html.split("<tr") if "<td" in r][1:]
+```
+
+The `[1:]` assumed the first row is a header. But the filter keeps only rows
+containing `<td>`, and header cells are normally `<th>` — so the header was
+already excluded and the `[1:]` **silently dropped the first real data row of
+every section**. Now the first row is only dropped if it actually looks like a
+header (`<th>` present, or the cell text matches column labels).
+
+### Malformed-row skips were invisible
+
+Every section parser counts rows it skips for having an unexpected column
+count, but only printed that count under `--debug`. A column change in the CRM
+export would drop records with no visible sign. Skips are now always reported.
+
+### Manager detection is a load-bearing guess
+
+`identify_managers()` classifies anyone whose records span more than one
+territory as a manager. Anyone flagged is excluded from rep visit totals and
+from coaching de-duplication, so a misclassification silently reshapes Total
+Visits, AM/PM Calls and Coaching Days.
+
+Two failure modes, both confirmed with a test:
+
+- a rep who **transfers territory mid-period** is promoted to manager and drops
+  out of the rep numbers entirely;
+- a manager who **only worked one territory** that period is never detected, so
+  their coaching days are never counted.
+
+You already have an org chart with explicit roles. `identify_managers()` now
+takes the hierarchy, treats its roles as authoritative for anyone it knows
+about, falls back to the heuristic for anyone missing from it, and **prints
+every disagreement**. Verified:
+
+```
+heuristic only        -> ['Mgr B', 'Rep A']      Rep A wrong, Mgr C missed
+with hierarchy check  -> ['Mgr B', 'Mgr C']      both corrected, both reported
+```
+
+Expect your coaching-day and visit numbers to move after this. That is the
+point — but check the reported disagreements against reality before trusting
+the new figures.
 
 ---
+
+## Still needs a decision from you
+
+**The two engines define a coaching day differently.** Same input, different
+answers:
+
+| | `pulpoplus_rebuild_summary.py` | `pulpoplus_extractor_summary.py` |
+|---|---|---|
+| Rule | manager accompanied **≥80%** of the rep's calls in *both* shifts | **≥1** matched visit in *both* shifts |
+
+The second is far easier to satisfy, so it reports more coaching days. I have
+not changed either — which one is correct is a business question, not a coding
+one. But whichever path a given month went through is currently determining the
+number, and that shouldn't be true. Pick one rule and I can align the other.
+
+`pulpoplus_hierarchy.py` and `generate_docs.py` were audited and left alone —
+the narrow `except Exception: pass` blocks in the hierarchy parser are guarded
+integer conversions and are fine as they stand.
+
+What I have **not** verified, because it needs real data to check against: the
+AM/PM shift category mappings, the 90-minute proximity tolerance, the 80%
+threshold, the half-day (0.5) counting rule for activities and office work, and
+the territory backfill's majority-vote fallback. Those are all judgement calls
+encoded as constants; they are consistent, but whether they match how your
+business actually defines these things I can't tell from the code alone.
 
 ## Setup
 
 ```bash
-cp .env.example .env      # then fill in the NEW keys
+cp .env.example .env      # then fill in the NEW keys + PULPO_USERNAME/PASSWORD
 npm install               # @supabase/supabase-js, dotenv, xlsx
 pip install -r requirements.txt --break-system-packages
 ```
@@ -223,10 +346,14 @@ Then the one-time SQL index for `update_hierarchy.js` (above).
 
 ## Suggested order
 
-1. Rotate keys, fill in `.env`, verify `.gitignore`.
+1. Rotate the Supabase keys **and change the CRM password**, fill in `.env`,
+   verify `.gitignore`.
 2. Create the unique index on `hierarchy(employee_code)`.
 3. Check whether the anon key can delete from `hierarchy` — if it can, add an
    RLS policy.
 4. Run `node check_visits.js "<name>" <date>` to see current duplicates.
 5. Clear the affected batch and re-upload with the fixed scripts.
 6. Confirm the numbers match the source workbook.
+7. Review the manager-mismatch warnings the rebuild now prints — those change
+   the totals.
+8. Decide which coaching-day rule is correct and align the two engines.
