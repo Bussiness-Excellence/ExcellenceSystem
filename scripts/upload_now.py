@@ -37,27 +37,26 @@ def upload_folder(folder, period, batch, append=True):
         print("  No .xlsx files found — skipping")
         return False
 
-    latest = max(files, key=lambda p: p.stat().st_mtime)
-    if len(files) > 1:
-        print(f"  {len(files)} workbooks present; using the most recent:")
-        for f in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
-            print(f"    {'-> ' if f == latest else '   '}{f.name}")
-
-    if not wait_until_stable(latest):
-        print(f"  {latest.name} is still being written — skipping")
-        return False
-
     url, key = _supabase_config()
-    file_batch = f"{batch}_{latest.stem}"
-    print(f"  Uploading {latest.name}  (batch={file_batch})")
-
-    try:
-        upload_workbook(url, key, str(latest), period=period,
-                        batch=file_batch, append=append)
-        return True
-    except Exception as exc:
-        print(f"  FAILED: {exc}")
-        return False
+    print(f"  {len(files)} workbooks present. Uploading all...")
+    
+    success_count = 0
+    for f in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
+        if not wait_until_stable(f):
+            print(f"  {f.name} is still being written — skipping")
+            continue
+            
+        file_batch = f"{batch}_{f.stem}"
+        print(f"\n  => Uploading {f.name}  (batch={file_batch})")
+        
+        try:
+            upload_workbook(url, key, str(f), period=period,
+                            batch=file_batch, append=append)
+            success_count += 1
+        except Exception as exc:
+            print(f"  FAILED: {exc}")
+            
+    return success_count > 0
 
 
 def main():
