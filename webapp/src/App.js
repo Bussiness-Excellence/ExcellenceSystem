@@ -1,14 +1,25 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider } from './contexts/ToastContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './components/Login';
-import Dashboard from './pages/Dashboard';
-import AdminPanel from './pages/AdminPanel';
-import ChangePassword from './components/ChangePassword';
-
 import './App.css';
+
+// Code-split the heavy routes. Previously every one of these was a static
+// import, so a user landing on /login downloaded the 2,800-line Dashboard,
+// the AdminPanel and the whole charting library before the login form could
+// paint. Now each route's JS is fetched only when that route is opened.
+//
+// Login is deliberately NOT lazy: it is the first thing most visits render,
+// and splitting it would add a network round trip to the critical path.
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const AdminPanel = lazy(() => import('./pages/AdminPanel'));
+const ChangePassword = lazy(() => import('./components/ChangePassword'));
+
+const Spinner = () => (
+  <div className="app-loading"><div className="app-spinner" /></div>
+);
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -33,8 +44,8 @@ class ErrorBoundary extends React.Component {
               {this.state.errorInfo && this.state.errorInfo.componentStack}
             </pre>
           </div>
-          <button 
-            onClick={() => { sessionStorage.clear(); window.location.reload(); }} 
+          <button
+            onClick={() => { sessionStorage.clear(); window.location.reload(); }}
             style={{ marginTop: '20px', padding: '12px 24px', backgroundColor: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
             🔄 Reset Cache & Reload App
           </button>
@@ -47,14 +58,14 @@ class ErrorBoundary extends React.Component {
 
 function LoginRoute() {
   const { session, profile, loading } = useAuth();
-  if (loading) return <div className="app-loading"><div className="app-spinner"/></div>;
+  if (loading) return <Spinner />;
   if (session && profile) return <Navigate to="/dashboard" replace />;
   return <Login />;
 }
 
 function RootRoute() {
   const { session, profile, loading } = useAuth();
-  if (loading) return <div className="app-loading"><div className="app-spinner"/></div>;
+  if (loading) return <Spinner />;
   if (!session || !profile) return <Navigate to="/login" replace />;
   // All roles (including Admin) land on the dashboard by default
   return <Navigate to="/dashboard" replace />;
@@ -62,45 +73,43 @@ function RootRoute() {
 
 function AppContent() {
   const { session, profile, loading } = useAuth();
-  
-  if (loading) {
-    return (
-      <div className="app-loading" style={{display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh'}}>
-        <div className="app-spinner" style={{
-          width: '40px', height: '40px', borderRadius: '50%', border: '3px solid rgba(0,0,0,0.1)', borderTopColor: '#3b82f6', animation: 'spin 1s linear infinite'
-        }}/>
-      </div>
-    );
-  }
+
+  if (loading) return <Spinner />;
 
   // If logged in but needs to change default password
   if (session && profile?.is_default_password) {
     return (
       <HashRouter>
-        <Routes>
-          <Route path="*" element={<ChangePassword />} />
-        </Routes>
+        <Suspense fallback={<Spinner />}>
+          <Routes>
+            <Route path="*" element={<ChangePassword />} />
+          </Routes>
+        </Suspense>
       </HashRouter>
     );
   }
 
   return (
     <HashRouter>
-      <Routes>
-        <Route path="/login" element={<LoginRoute />} />
-        <Route path="/dashboard" element={
-          <ProtectedRoute>
-            <Dashboard />
-          </ProtectedRoute>
-        } />
-        <Route path="/admin" element={
-          <ProtectedRoute adminOnly={true}>
-            <AdminPanel />
-          </ProtectedRoute>
-        } />
-        <Route path="/" element={<RootRoute />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      {/* One Suspense boundary around the whole route table: any lazy route
+          shows the same spinner while its chunk downloads. */}
+      <Suspense fallback={<Spinner />}>
+        <Routes>
+          <Route path="/login" element={<LoginRoute />} />
+          <Route path="/dashboard" element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin" element={
+            <ProtectedRoute adminOnly={true}>
+              <AdminPanel />
+            </ProtectedRoute>
+          } />
+          <Route path="/" element={<RootRoute />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </HashRouter>
   );
 }
