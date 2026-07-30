@@ -114,6 +114,40 @@ function fmtVal(v, key) {
   return v;
 }
 
+function formatDateDisplay(val) {
+  if (!val) return '—';
+  const s = String(val).trim();
+  // Period format "YYYY-MM" or "2026-07"
+  const mPeriod = s.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (mPeriod) {
+    const yr = parseInt(mPeriod[1], 10);
+    const mo = parseInt(mPeriod[2], 10) - 1;
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    if (mo >= 0 && mo < 12) return `${monthNames[mo]} ${yr}`;
+  }
+  // Date format "YYYY-MM-DD"
+  const mIso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (mIso) {
+    const yr = parseInt(mIso[1], 10);
+    const mo = parseInt(mIso[2], 10) - 1;
+    const da = parseInt(mIso[3], 10);
+    const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    if (mo >= 0 && mo < 12) return `${shortMonths[mo]} ${da}, ${yr}`;
+  }
+  // Date format "DD-MM-YYYY" or "MM/DD/YYYY"
+  const mUs = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (mUs) {
+    const p1 = parseInt(mUs[1], 10);
+    const p2 = parseInt(mUs[2], 10);
+    const yr = parseInt(mUs[3], 10);
+    const mo = (p1 > 12 ? p2 : p1) - 1;
+    const da = p1 > 12 ? p1 : p2;
+    const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    if (mo >= 0 && mo < 12) return `${shortMonths[mo]} ${da}, ${yr}`;
+  }
+  return s;
+}
+
 function sortSummary(rows) {
   return [...rows].sort((a, b) => {
     const tc = (a.team || '').localeCompare(b.team || '');
@@ -418,7 +452,7 @@ function ShiftToggle({ value, onChange, t }) {
 }
 
 // ── PivotTable ───────────────────────────────────────────────────────────────
-function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFilter, lang, hideAvg }) {
+function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, shiftFilter, userFilter, searchFilter, lang, hideAvg, rowTitle, colTitle }) {
   const filtered = useMemo(() => rows.filter(r => {
     if (shiftFilter !== 'all' && r.shift !== shiftFilter) return false;
     if (userFilter && userFilter !== 'all' && r.user_name !== userFilter) return false;
@@ -426,24 +460,30 @@ function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFil
       && !r.user_name?.toLowerCase().includes(searchFilter.toLowerCase())) return false;
     return true;
   }), [rows, rowKey, shiftFilter, userFilter, searchFilter]);
-  const users = useMemo(() => [...new Set(filtered.map(r => r.user_name))].sort(), [filtered]);
-  const rowKeys = useMemo(() => [...new Set(filtered.map(r => r[rowKey]))].sort(), [filtered, rowKey]);
+
+  const cols = useMemo(() => [...new Set(filtered.map(r => r[colKey] || 'Unassigned'))].sort(), [filtered, colKey]);
+  const rowKeys = useMemo(() => [...new Set(filtered.map(r => r[rowKey] || 'Other'))].sort(), [filtered, rowKey]);
+
   const cells = useMemo(() => {
     const c = {};
     filtered.forEach(r => {
-      const k = r[rowKey]; if (!c[k]) c[k] = {};
-      c[k][r.user_name] = (c[k][r.user_name] || 0) + (r[valueKey] || 0);
+      const rVal = r[rowKey] || 'Other';
+      const cVal = r[colKey] || 'Unassigned';
+      if (!c[rVal]) c[rVal] = {};
+      c[rVal][cVal] = (c[rVal][cVal] || 0) + (r[valueKey] || 0);
     });
     return c;
-  }, [filtered, rowKey, valueKey]);
+  }, [filtered, rowKey, colKey, valueKey]);
+
   const colTotals = useMemo(() => {
     const ct = {};
-    users.forEach(u => ct[u] = filtered.filter(r => r.user_name === u).reduce((s, r) => s + (r[valueKey] || 0), 0));
+    cols.forEach(col => {
+      ct[col] = filtered.filter(r => (r[colKey] || 'Unassigned') === col).reduce((s, r) => s + (r[valueKey] || 0), 0);
+    });
     return ct;
-  }, [users, filtered, valueKey]);
+  }, [cols, filtered, colKey, valueKey]);
 
-  // Synced top scrollbar — lets people scroll horizontally without hunting
-  // for the scrollbar at the bottom of a long table.
+  // Synced top scrollbar
   const topScrollRef = useRef(null);
   const wrapRef = useRef(null);
   const [tableWidth, setTableWidth] = useState(0);
@@ -459,7 +499,7 @@ function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFil
     const ro = new ResizeObserver(update);
     ro.observe(table);
     return () => ro.disconnect();
-  }, [filtered, users, rowKeys]);
+  }, [filtered, cols, rowKeys]);
 
   const handleTopScroll = () => {
     if (syncingRef.current) { syncingRef.current = false; return; }
@@ -475,6 +515,9 @@ function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFil
   };
 
   if (!filtered.length) return <div className="dash-empty">{lang === 'ar' ? 'لا توجد بيانات' : 'No data'}</div>;
+
+  const defaultRowTitle = rowKey === 'specialty' ? (lang === 'ar' ? 'التخصص' : 'Specialty') : rowKey === 'product' ? (lang === 'ar' ? 'المنتج' : 'Product') : rowKey;
+
   return (
     <>
       <div className="pivot-top-scroll" ref={topScrollRef} onScroll={handleTopScroll}>
@@ -484,22 +527,22 @@ function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFil
         <table className="pivot-tbl">
           <thead>
             <tr>
-              <th className="s-col">{rowKey === 'specialty' ? (lang === 'ar' ? 'التخصص' : 'Specialty') : (lang === 'ar' ? 'المنتج' : 'Product')}</th>
-              {users.map(u => <th key={u} title={u}>{u.split(' ').slice(0, 2).join(' ')}</th>)}
+              <th className="s-col">{rowTitle || defaultRowTitle}</th>
+              {cols.map(c => <th key={c} title={c}>{colKey === 'user_name' ? c.split(' ').slice(0, 2).join(' ') : c}</th>)}
               <th className="t-col">Σ Total</th>
             </tr>
             {!hideAvg && (
               <tr className="avg-row">
-                <th className="s-col avg-lbl">⌀ Avg / rep</th>
-                {users.map(u => {
-                  const uTotal = colTotals[u] || 0;
-                  const uRows = rowKeys.filter(k => cells[k]?.[u]).length;
-                  return <th key={u} className="avg-cell">{uRows > 0 ? Math.round(uTotal / uRows) : 0}</th>;
+                <th className="s-col avg-lbl">⌀ Avg</th>
+                {cols.map(c => {
+                  const cTotal = colTotals[c] || 0;
+                  const cRows = rowKeys.filter(k => cells[k]?.[c]).length;
+                  return <th key={c} className="avg-cell">{cRows > 0 ? Math.round(cTotal / cRows) : 0}</th>;
                 })}
                 <th className="t-col avg-cell">
                   {(() => {
                     const gt = filtered.reduce((s, r) => s + (r[valueKey] || 0), 0);
-                    return users.length > 0 ? Math.round(gt / users.length) : 0;
+                    return cols.length > 0 ? Math.round(gt / cols.length) : 0;
                   })()}
                 </th>
               </tr>
@@ -507,13 +550,13 @@ function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFil
           </thead>
           <tbody>
             {rowKeys.map(k => {
-              const rowTotal = users.reduce((s, u) => s + (cells[k]?.[u] || 0), 0);
+              const rowTotal = cols.reduce((s, c) => s + (cells[k]?.[c] || 0), 0);
               return (
                 <tr key={k}>
                   <td className="s-col">{k}</td>
-                  {users.map(u => {
-                    const v = cells[k]?.[u];
-                    return <td key={u} className={v ? 'has-v' : 'nil'}>{v || ''}</td>;
+                  {cols.map(c => {
+                    const v = cells[k]?.[c];
+                    return <td key={c} className={v ? 'has-v' : 'nil'}>{v || ''}</td>;
                   })}
                   <td className="t-col">{rowTotal}</td>
                 </tr>
@@ -521,7 +564,7 @@ function PivotTable({ rows, rowKey, valueKey, shiftFilter, userFilter, searchFil
             })}
             <tr className="tot-row">
               <td className="s-col">Σ Total</td>
-              {users.map(u => <td key={u}>{colTotals[u] || 0}</td>)}
+              {cols.map(c => <td key={c}>{colTotals[c] || 0}</td>)}
               <td className="t-col">{filtered.reduce((s, r) => s + (r[valueKey] || 0), 0)}</td>
             </tr>
           </tbody>
@@ -539,8 +582,11 @@ export default function Dashboard() {
   const [availablePeriods, setAvailablePeriods] = useState([]);
   const [team, setTeam] = useState('all');
   const [shift, setShift] = useState('all'); // Default is Both
-  const [timeGrain, setTimeGrain] = useState('all'); // 'all' | 'biweekly1' | 'biweekly2' | 'week1' | 'week2' | 'week3' | 'week4'
+  const [timeGrain, setTimeGrain] = useState('all'); // 'all' | 'biweekly1' | 'biweekly2' | 'week1' | 'week2' | 'week3' | 'week4' | 'daily'
+  const [selectedDate, setSelectedDate] = useState('');
   const [search, setSearch] = useState('');
+  const [specPivotMode, setSpecPivotMode] = useState('class'); // 'class' | 'user'
+  const [prodPivotMode, setProdPivotMode] = useState('spec');  // 'spec' | 'user'
 
   useEffect(() => {
     async function loadPeriods() {
@@ -578,42 +624,22 @@ export default function Dashboard() {
     if (timeGrain === 'biweekly1' || timeGrain === 'biweekly2') return 0.50;
     if (timeGrain === 'week1' || timeGrain === 'week2' || timeGrain === 'week3') return 7 / 30;
     if (timeGrain === 'week4') return 9 / 30;
+    if (timeGrain === 'daily') return 1 / 30;
     return 1.0;
   }, [timeGrain]);
 
   const normalizeDateStr = useCallback((dStr) => {
     if (!dStr) return '';
     const s = String(dStr).trim();
-
-    // ISO format: YYYY-MM-DD or YYYY/MM/DD
     let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-    if (m) {
-      const yr = m[1];
-      const mo = String(m[2]).padStart(2, '0');
-      const da = String(m[3]).padStart(2, '0');
-      return `${yr}-${mo}-${da}`;
-    }
-
-    // Standard CRM format: DD/MM/YYYY or MM/DD/YYYY
+    if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
     m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
     if (m) {
       const p1 = parseInt(m[1], 10);
       const p2 = parseInt(m[2], 10);
-      const yr = m[3];
-
-      let day, month;
-      if (p2 > 12) {
-        // MM/DD/YYYY format: p1 is month, p2 is day (e.g. 07/18/2026)
-        month = p1;
-        day = p2;
-      } else {
-        // Standard DD/MM/YYYY format: p1 is day, p2 is month (e.g. 08/07/2026)
-        day = p1;
-        month = p2;
-      }
-      return `${yr}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      if (p1 > 12) return `${m[3]}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+      return `${m[3]}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
     }
-
     return s;
   }, []);
 
@@ -621,15 +647,19 @@ export default function Dashboard() {
     if (!rows || !rows.length || timeGrain === 'all') return rows;
     return rows.filter(r => {
       const rawDate = r.visit_date || r.coaching_date || r.date;
-      if (!rawDate) return false;
+      if (!rawDate) return true;
       const isoDate = normalizeDateStr(rawDate);
-      if (!isoDate) return false;
+      if (!isoDate) return true;
 
       const parts = isoDate.split('-');
-      if (parts.length < 3) return false;
+      if (parts.length < 3) return true;
       const day = parseInt(parts[2], 10);
-      if (isNaN(day)) return false;
 
+      if (timeGrain === 'daily') {
+        if (!selectedDate) return true;
+        const normSelected = normalizeDateStr(selectedDate);
+        return isoDate === normSelected;
+      }
       if (timeGrain === 'biweekly1') return day >= 1 && day <= 15;
       if (timeGrain === 'biweekly2') return day >= 16 && day <= 31;
       if (timeGrain === 'week1') return day >= 1 && day <= 7;
@@ -638,7 +668,7 @@ export default function Dashboard() {
       if (timeGrain === 'week4') return day >= 22 && day <= 31;
       return true;
     });
-  }, [timeGrain, normalizeDateStr]);
+  }, [timeGrain, selectedDate, normalizeDateStr]);
   const [userFilter, setUser] = useState('all');
   const [tab, setTab] = useState('summary');
   const [rawSummary, setSummary] = useState([]);
@@ -680,45 +710,45 @@ export default function Dashboard() {
     return map;
   }, [hierarchy]);
 
-  const userTeamMap = useMemo(() => {
-    const map = {};
+    const userTeamMap = useMemo(() => {
+      const map = {};
+      
+      const addTeam = (mgrName, teamStr) => {
+        if (!mgrName || !teamStr || teamStr === 'Unknown') return;
+        const norm = mgrName.toLowerCase().trim();
+        if (!map[norm]) map[norm] = new Set();
+        teamStr.split(/;\s*/).filter(Boolean).forEach(t => map[norm].add(t));
+      };
 
-    const addTeam = (mgrName, teamStr) => {
-      if (!mgrName || !teamStr || teamStr === 'Unknown') return;
-      const norm = mgrName.toLowerCase().trim();
-      if (!map[norm]) map[norm] = new Set();
-      teamStr.split(/;\s*/).filter(Boolean).forEach(t => map[norm].add(t));
-    };
+      // 1. Gather from rawSummary
+      rawSummary.forEach(r => {
+        if (r.user_name && r.team) addTeam(r.user_name, r.team);
+      });
 
-    // 1. Gather from rawSummary
-    rawSummary.forEach(r => {
-      if (r.user_name && r.team) addTeam(r.user_name, r.team);
-    });
+      // 2. Gather from complete hierarchy using teamsMap
+      (hierarchy || []).forEach(h => {
+        const teamName = teamsMap[h.team_id];
+        if (!teamName) return;
+        
+        if (h.employee_name) addTeam(h.employee_name, teamName);
+        if (h.supervisor_name) addTeam(h.supervisor_name, teamName);
+        if (h.area_manager_name) addTeam(h.area_manager_name, teamName);
+        if (h.blm_name && !h.blm_name.toLowerCase().includes('directory') && !h.blm_name.toLowerCase().includes('team')) {
+          addTeam(h.blm_name, teamName);
+        }
+      });
 
-    // 2. Gather from complete hierarchy using teamsMap
-    (hierarchy || []).forEach(h => {
-      const teamName = teamsMap[h.team_id];
-      if (!teamName) return;
+      const finalMap = {};
+      Object.keys(map).forEach(k => {
+        finalMap[k] = Array.from(map[k]).sort().join('; ');
+      });
+      return finalMap;
+    }, [rawSummary, hierarchy, teamsMap]);
 
-      if (h.employee_name) addTeam(h.employee_name, teamName);
-      if (h.supervisor_name) addTeam(h.supervisor_name, teamName);
-      if (h.area_manager_name) addTeam(h.area_manager_name, teamName);
-      if (h.blm_name && !h.blm_name.toLowerCase().includes('directory') && !h.blm_name.toLowerCase().includes('team')) {
-        addTeam(h.blm_name, teamName);
-      }
-    });
-
-    const finalMap = {};
-    Object.keys(map).forEach(k => {
-      finalMap[k] = Array.from(map[k]).sort().join('; ');
-    });
-    return finalMap;
-  }, [rawSummary, hierarchy, teamsMap]);
-
-  const summary = useMemo(() => rawSummary.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSummary, userTeamMap]);
-  const specialty = useMemo(() => rawSpecialty.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSpecialty, userTeamMap]);
-  const products = useMemo(() => rawProducts.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawProducts, userTeamMap]);
-  const coaching = useMemo(() => rawCoaching.map(r => ({ ...r, team: userTeamMap[r.manager_name?.toLowerCase().trim()] || r.team })), [rawCoaching, userTeamMap]);
+    const summary = useMemo(() => rawSummary.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSummary, userTeamMap]);
+    const specialty = useMemo(() => rawSpecialty.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSpecialty, userTeamMap]);
+    const products = useMemo(() => rawProducts.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawProducts, userTeamMap]);
+    const coaching = useMemo(() => rawCoaching.map(r => ({ ...r, team: userTeamMap[r.manager_name?.toLowerCase().trim()] || r.team })), [rawCoaching, userTeamMap]);
 
 
 
@@ -757,27 +787,17 @@ export default function Dashboard() {
   const periodLabel = period;
   // Stable ref tracking what data has been fetched — survives re-renders without causing them
   const fetchedKeyRef = React.useRef(null);
-  // Key currently being fetched. fetchedKeyRef is only set AFTER a load
-  // finishes, so it cannot stop a second load that starts while the first
-  // is still running -- which is how the dashboard ended up issuing two
-  // full sets of paginated requests (102 instead of 51) on every open.
-  const inFlightKeyRef = React.useRef(null);
   const codesKey = visibleCodes ? [...visibleCodes].sort().join(',') : '';
-  const currentKey = `${periodLabel}|${codesKey}|${isMgr}`;
+  const currentKey = `${periodLabel}|${codesKey}|${isMgr}|${timeGrain}|${selectedDate || ''}`;
 
   const load = useCallback(async (force = false) => {
     if (!visibleCodes?.length) { setLoading(false); return; }
     const isAdmin = profile?.role === 'Admin';
     const codes = visibleCodes;
-    // codesKey and isAdmin MUST be in the cache key. Without them a rep and
-    // a manager in the same tab collide on one entry and see each other's data.
-    const cacheKey = `dash_v3_${periodLabel}_${isMgr}_${isAdmin}_${codesKey}`;
+    const cacheKey = `dash_${periodLabel}_${isMgr}_${codesKey}_${timeGrain}_${selectedDate || ''}`;
 
     // Skip if already fetched this key (tab switch won't retrigger)
     if (!force && fetchedKeyRef.current === currentKey) return;
-    // Already fetching this exact key -- do not start a second run.
-    if (inFlightKeyRef.current === currentKey) return;
-    inFlightKeyRef.current = currentKey;
 
     const SPECIAL_MANAGERS = [
       'ahmad morsy', 'ahmed elasyed', 'ahmed tarek mohamed', 'akram ahmed elhossary',
@@ -800,178 +820,103 @@ export default function Dashboard() {
     if (cached) {
       try {
         const parsed = JSON.parse(cached);
-        if (parsed.visits && parsed.visits.length > 3000) {
-          setSummary(overrideSpecialManagers(parsed.summaries));
-          setSpecialty(overrideSpecialManagers(parsed.specialty));
-          setProducts(overrideSpecialManagers(parsed.products));
-          setCoaching(overrideSpecialManagers(parsed.coaching));
-          setVisits(parsed.visits);
-          fetchedKeyRef.current = currentKey;
-          inFlightKeyRef.current = null;
-          setLoading(false);
-          return;
-        }
+        setSummary(overrideSpecialManagers(parsed.summaries));
+        setSpecialty(overrideSpecialManagers(parsed.specialty));
+        setProducts(overrideSpecialManagers(parsed.products));
+        setCoaching(overrideSpecialManagers(parsed.coaching));
+        if (parsed.visits) setVisits(parsed.visits);
+        fetchedKeyRef.current = currentKey;
+        setLoading(false);
+        return;
       } catch (e) { /* ignore corrupted cache */ }
     }
 
     setLoading(true); setError('');
+    // Resolve periodLabel + timeGrain (+ selectedDate for daily mode) into
+    // real ISO date bounds, so the network fetch itself is scoped to the
+    // selected week/day — not just filtered client-side after downloading
+    // the whole month every time.
+    const periodDate = periodLabel ? new Date(`1 ${periodLabel}`) : null;
+    let rangeStart = null, rangeEnd = null;
+    if (periodDate && !isNaN(periodDate.getTime())) {
+      const y = periodDate.getFullYear();
+      const m = periodDate.getMonth();
+      const lastDay = new Date(y, m + 1, 0).getDate();
+      const pad = (n) => String(n).padStart(2, '0');
+      const dayStr = (d) => `${y}-${pad(m + 1)}-${pad(d)}`;
 
-    const parsePeriodToDates = (pStr) => {
-      if (!pStr) return { startDate: null, endDate: null };
-      const months = {
-        january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
-        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
-      };
-      const parts = pStr.trim().split(/\s+/);
-      if (parts.length === 2) {
-        const mName = parts[0].toLowerCase();
-        const yr = parseInt(parts[1], 10);
-        if (months[mName] && !isNaN(yr)) {
-          const mNum = months[mName];
-          const mo = String(mNum).padStart(2, '0');
-          const startDate = `${yr}-${mo}-01`;
-          const lastDay = new Date(yr, mNum, 0).getDate();
-          const endDate = `${yr}-${mo}-${String(lastDay).padStart(2, '0')}`;
-          return { startDate, endDate };
-        }
-      }
-      return { startDate: null, endDate: null };
-    };
-
-    const fetchVisitsPaginated = async () => {
-      const t0 = performance.now();
-      const { startDate, endDate } = parsePeriodToDates(periodLabel);
-      const pageSize = 1000;
-      const selectCols = 'user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products';
-
-      // ORDER BY is mandatory. Postgres gives no stable row order without
-      // one, so each .range() request is free to return rows in a different
-      // sequence -- some rows arrive twice, others never. 'id' is the
-      // tiebreaker: visit_date alone is not unique, and a non-unique sort
-      // key is still unstable across requests.
-      //
-      // It is also what makes the parallel fetch below CORRECT. Firing all
-      // page requests at once is only safe because every request now sorts
-      // identically; without ORDER BY the pages would not line up.
-      const buildQuery = () => {
-        let q = supabase.from('visits').select(selectCols, { count: 'exact' });
-        if (periodLabel) {
-          q = q.eq('period', periodLabel);
-        } else if (startDate && endDate) {
-          q = q.gte('visit_date', startDate).lte('visit_date', endDate);
-        }
-        return q.order('visit_date', { ascending: true })
-          .order('id', { ascending: true });
-      };
-
-      // One cheap request to learn how many rows exist, so the rest can go
-      // out in parallel instead of six sequential round trips.
-      const { count: total, error: countErr } = await buildQuery()
-        .range(0, 0);
-      if (countErr) throw new Error(`visits count failed: ${countErr.message}`);
-      if (!total) return [];
-
-      const pages = Math.min(Math.ceil(total / pageSize), 50);
-      if (pages === 50) {
-        console.warn('visits: hit the 50,000-row cap; data is truncated.');
-      }
-
-      const results = await Promise.all(
-        Array.from({ length: pages }, (_, i) =>
-          buildQuery()
-            .range(i * pageSize, (i + 1) * pageSize - 1)
-            .then(({ data, error }) => {
-              if (error) throw new Error(`visits page ${i} failed: ${error.message}`);
-              return data || [];
-            })
-        )
-      );
-
-      let allVisits = results.flat();
-
-      if (allVisits.length < total) {
-        console.error(
-          `visits: fetched ${allVisits.length} of ${total} rows. ` +
-          `Dashboard totals will be understated.`
-        );
-      }
-      console.info(
-        `visits: ${allVisits.length} rows in ${pages} parallel page(s), ` +
-        `${Math.round(performance.now() - t0)}ms`
-      );
-
-      if (!isAdmin && codes && codes.length > 0) {
-        const codeSet = new Set(codes.map(c => String(c).trim()));
-        allVisits = allVisits.filter(v => v.employee_code && codeSet.has(String(v.employee_code).trim()));
-      }
-      return allVisits;
-    };
-
-    // try/finally is load-bearing. setLoading(true) happens above, and
-    // fetchVisitsPaginated now throws on a failed page instead of quietly
-    // returning short data. Without finally, one bad page leaves the
-    // dashboard on 'Loading...' forever with nothing on screen.
-    try {
-      const [rpcRes, teamsRes, visitsData] = await Promise.all([
-        supabase.rpc('get_dashboard_data', {
-          p_period: periodLabel,
-          p_codes: codes,
-          p_is_admin: isAdmin,
-          p_is_manager: isMgr
-        }),
-        supabase.from('teams').select('id, name'),
-        fetchVisitsPaginated()
-      ]);
-
-      if (visitsData) setVisits(visitsData);
-
-      if (teamsRes.data) {
-        const tMap = {};
-        teamsRes.data.forEach(t => tMap[t.id] = t.name);
-        setTeamsMap(tMap);
-      }
-
-      const { data, error: rpcError } = rpcRes;
-
-      if (rpcError) {
-        setError(rpcError.message);
+      if (timeGrain === 'daily' && selectedDate) {
+        const norm = normalizeDateStr(selectedDate);
+        rangeStart = norm; rangeEnd = norm;
+      } else if (timeGrain === 'biweekly1') {
+        rangeStart = dayStr(1); rangeEnd = dayStr(15);
+      } else if (timeGrain === 'biweekly2') {
+        rangeStart = dayStr(16); rangeEnd = dayStr(lastDay);
+      } else if (timeGrain === 'week1') {
+        rangeStart = dayStr(1); rangeEnd = dayStr(7);
+      } else if (timeGrain === 'week2') {
+        rangeStart = dayStr(8); rangeEnd = dayStr(14);
+      } else if (timeGrain === 'week3') {
+        rangeStart = dayStr(15); rangeEnd = dayStr(21);
+      } else if (timeGrain === 'week4') {
+        rangeStart = dayStr(22); rangeEnd = dayStr(lastDay);
       } else {
-        // The old `catch (e) { }` here hid a QuotaExceededError. The
-        // visits array is ~2.5 MB for a SINGLE team-month, and
-        // sessionStorage caps out around 5 MB, so for an Admin viewing
-        // all teams the write always threw and was always swallowed --
-        // the cache silently never persisted and every single load
-        // refetched everything from scratch.
-        data.visits = visitsData;
-        try {
-          sessionStorage.setItem(cacheKey, JSON.stringify(data));
-        } catch (e) {
-          // Drop the stale entry so a half-written value can't be read back.
-          try { sessionStorage.removeItem(cacheKey); } catch (_) { }
-          console.warn(
-            `Dashboard cache disabled: payload too large for sessionStorage ` +
-            `(${visitsData?.length ?? 0} visit rows). Every reload will refetch. ` +
-            `Move the aggregation server-side to fix this properly.`
-          );
-        }
+        // 'all' (whole month) — still bounded, just the full month
+        rangeStart = dayStr(1); rangeEnd = dayStr(lastDay);
       }
-
-      setSummary(overrideSpecialManagers(data?.summaries));
-      setSpecialty(overrideSpecialManagers(data?.specialty));
-      setProducts(overrideSpecialManagers(data?.products));
-      setCoaching(overrideSpecialManagers(data?.coaching));
-      fetchedKeyRef.current = currentKey;
-    } catch (e) {
-      // Surface it. A visible error beats an eternal spinner, and beats
-      // silently-wrong totals even more.
-      console.error('Dashboard load failed:', e);
-      setError(e?.message || 'Failed to load dashboard data.');
-    } finally {
-      inFlightKeyRef.current = null;
-      setLoading(false);
     }
+
+    const [rpcRes, teamsRes, visitsRes] = await Promise.all([
+      supabase.rpc('get_dashboard_data', {
+        p_period: periodLabel,
+        p_codes: codes,
+        p_is_admin: isAdmin,
+        p_is_manager: isMgr,
+        p_start_date: rangeStart,
+        p_end_date: rangeEnd,
+      }),
+      supabase.from('teams').select('id, name'),
+      (() => {
+        let visitsQuery = supabase.from('visits')
+          .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products')
+          .in('employee_code', codes);
+        if (periodLabel) {
+          visitsQuery = visitsQuery.eq('period', periodLabel);
+        }
+        if (rangeStart && rangeEnd) {
+          visitsQuery = visitsQuery.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
+        }
+        return visitsQuery;
+      })()
+    ]);
+
+    if (visitsRes.data) setVisits(visitsRes.data);
+
+    if (teamsRes.data) {
+      const tMap = {};
+      teamsRes.data.forEach(t => tMap[t.id] = t.name);
+      setTeamsMap(tMap);
+    }
+
+    const { data, error: rpcError } = rpcRes;
+
+    if (rpcError) {
+      setError(rpcError.message);
+    } else {
+      try { 
+        data.visits = visitsRes.data;
+        sessionStorage.setItem(cacheKey, JSON.stringify(data)); 
+      } catch (e) { }
+    }
+
+    setSummary(overrideSpecialManagers(data?.summaries));
+    setSpecialty(overrideSpecialManagers(data?.specialty));
+    setProducts(overrideSpecialManagers(data?.products));
+    setCoaching(overrideSpecialManagers(data?.coaching));
+    fetchedKeyRef.current = currentKey;
+    setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [periodLabel, currentKey, isMgr, profile]);
+  }, [periodLabel, currentKey, isMgr, profile, timeGrain, selectedDate]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1171,39 +1116,20 @@ export default function Dashboard() {
       const ratio = getTimeGrainRatio();
       const numKeys = ['working_days', 'complete_field_days', 'am_shift_days', 'pm_shift_days', 'double_visit_days', 'office_work_days', 'no_activities', 'no_events', 'am_calls', 'pm_calls', 'total_am_covered', 'total_pm_covered', 'amcenter_covered', 'hospital_covered', 'clinic_covered', 'polyclinic_covered', 'pharmacies_visited', 'pharmacies_covered', 'total_product_calls'];
 
-      // Pre-filter and pre-group rawVisits once for O(1) representative lookup
-      const visitsByCodeMap = {};
-      const visitsByNameMap = {};
-      if (hasVisitsData) {
-        const slicedVisits = filterByTimeGrain(rawVisits);
-        slicedVisits.forEach(v => {
-          if (v.employee_code) {
-            const c = String(v.employee_code).trim();
-            if (!visitsByCodeMap[c]) visitsByCodeMap[c] = [];
-            visitsByCodeMap[c].push(v);
-          }
-          if (v.user) {
-            const u = v.user.toLowerCase().trim();
-            if (!visitsByNameMap[u]) visitsByNameMap[u] = [];
-            visitsByNameMap[u].push(v);
-          }
-        });
-      }
-
       finalArr.forEach(x => {
         const normName = x.user_name?.toLowerCase().trim();
         const code = x.employee_code;
-        const codeKey = code ? String(code).trim() : null;
-        const userVisitsByCode = codeKey ? visitsByCodeMap[codeKey] : null;
-        const userVisitsByName = normName ? visitsByNameMap[normName] : null;
-        const userVisits = hasVisitsData ? (userVisitsByCode || userVisitsByName || []) : [];
+        const userVisits = hasVisitsData ? (rawVisits || []).filter(v => {
+          const matchUser = (code && String(v.employee_code).trim() === String(code).trim()) || (normName && v.user?.toLowerCase().trim() === normName);
+          return matchUser && filterByTimeGrain([v]).length > 0;
+        }) : [];
 
         if (hasVisitsData) {
           // Identify activity/office work dates to exclude from working days
           const isActivity = v => {
-            const cat1 = (v.acc_type_category || '').toLowerCase();
-            const cat2 = (v.visit_type_category || '').toLowerCase();
-            return cat1.includes('activity') || cat1.includes('office') || cat2.includes('activity') || cat2.includes('office');
+             const cat1 = (v.acc_type_category || '').toLowerCase();
+             const cat2 = (v.visit_type_category || '').toLowerCase();
+             return cat1.includes('activity') || cat1.includes('office') || cat2.includes('activity') || cat2.includes('office');
           };
           const activityDates = new Set(userVisits.filter(isActivity).map(v => v.visit_date).filter(Boolean));
 
@@ -1222,7 +1148,7 @@ export default function Dashboard() {
             const amDates = new Set(allUserAmVisits.map(v => v.visit_date).filter(Boolean));
             const pmDates = new Set(allUserPmVisits.map(v => v.visit_date).filter(Boolean));
             const allDates = new Set(userVisits.map(v => v.visit_date).filter(Boolean));
-
+            
             // Managers get shift days and working days from their Coaching Days
             if (x.is_manager) {
               const mgrCoaches = filteredCoaching.filter(c => c.manager_name === x.user_name);
@@ -1239,14 +1165,14 @@ export default function Dashboard() {
                 }
               });
             }
-
+            
             // Remove activity days from ALL day calculations (per user request)
             activityDates.forEach(d => {
               allDates.delete(d);
               amDates.delete(d);
               pmDates.delete(d);
             });
-
+            
             let completeCount = 0;
             allDates.forEach(d => { if (amDates.has(d) && pmDates.has(d)) completeCount++; });
 
@@ -1277,10 +1203,10 @@ export default function Dashboard() {
             const amAccountIds = amAccountVisits.map(v => v.acc_id || v.acc_name).filter(Boolean);
             x.am_accounts_unique = new Set(amAccountIds).size;
             x.am_accounts_revisits = Math.max(0, amAccountIds.length - new Set(amAccountIds).size);
-            x.pharmacies_visited = userVisits.filter(v =>
-              (v.acc_type_category || '').toLowerCase().includes('pharmacy') ||
-              (v.acc_type_raw || '').toLowerCase().includes('pharmacy') ||
-              (v.acc_name || '').toLowerCase().includes('pharmacy')
+            x.pharmacies_visited = userVisits.filter(v => 
+              (v.acc_type_category||'').toLowerCase().includes('pharmacy') || 
+              (v.acc_type_raw||'').toLowerCase().includes('pharmacy') || 
+              (v.acc_name||'').toLowerCase().includes('pharmacy')
             ).length;
             x.amcenter_covered = new Set(amVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('am center')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
             x.hospital_covered = new Set(amVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('hospital')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
@@ -1350,38 +1276,38 @@ export default function Dashboard() {
   }, [summary]);
 
   const fSpecialty = useMemo(() => {
-    let sourceData = specialty;
-    if (timeGrain !== 'all' && rawVisits?.length > 0) {
-      const filteredV = filterByTimeGrain(rawVisits);
-      const groups = {};
-      filteredV.forEach(v => {
-        if (!v.shift || (v.shift !== 'AM' && v.shift !== 'PM')) return;
-        const uName = v.user || '';
-        const spec = v.specialty || 'Unknown';
-        const cls = v.classification || 'Unknown';
-        const key = `${uName}||${spec}||${cls}||${v.shift}`;
-        if (!groups[key]) {
-          groups[key] = {
-            user_name: uName,
+    if (rawVisits && rawVisits.length > 0 && rawVisits.some(v => v.specialty)) {
+      const filteredVisits = filterByTimeGrain(rawVisits);
+      const map = new Map();
+      filteredVisits.forEach(v => {
+        if (!v.specialty) return;
+        const u = v.user || v.user_name || 'Unknown';
+        const spec = v.specialty;
+        const cls = v.classification || 'Unclassified';
+        const shft = v.shift || 'AM';
+        const key = `${u}||${spec}||${cls}||${shft}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            user_name: u,
             employee_code: v.employee_code,
             specialty: spec,
             classification: cls,
-            shift: v.shift,
-            team: v.team || '',
+            shift: shft,
             call_count: 0,
-            _docs: new Set()
-          };
+            team: userTeamMap[u.toLowerCase().trim()] || v.team || ''
+          });
         }
-        groups[key].call_count += 1;
-        if (v.doctor_key || v.doctor_name) groups[key]._docs.add(v.doctor_key || v.doctor_name);
+        map.get(key).call_count += 1;
       });
-      sourceData = Object.values(groups).map(g => ({
-        ...g,
-        unique_doctors: g._docs.size
-      }));
+      let r = Array.from(map.values());
+      r = byManagerTerritory(byLineManager(byTeam(r)));
+      if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
+      if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
+      if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
+      return r;
     }
 
-    let r = byManagerTerritory(byLineManager(byTeam(sourceData)));
+    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(specialty))));
     if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
     if (userFilter !== 'all') {
       const targetNames = new Set([userFilter]);
@@ -1397,52 +1323,47 @@ export default function Dashboard() {
       });
       r = r.filter(x => targetNames.has(x.user_name));
     }
-
-    // Exclude managers from team totals unless explicitly filtered to a single manager
     if (userFilter === 'all') {
       r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
     }
-
     return r;
-  }, [specialty, rawVisits, timeGrain, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames]);
+  }, [rawVisits, specialty, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
 
   const fProducts = useMemo(() => {
-    let sourceData = products;
-    if (timeGrain !== 'all' && rawVisits?.length > 0) {
-      const filteredV = filterByTimeGrain(rawVisits);
-      const groups = {};
-      filteredV.forEach(v => {
-        if (!v.shift || (v.shift !== 'AM' && v.shift !== 'PM') || !v.products) return;
-        const uName = v.user || '';
-        const spec = v.specialty || 'Unknown';
-        const prods = String(v.products).split(',');
-        prods.forEach(pRaw => {
-          const prod = pRaw.trim();
-          if (!prod) return;
-          const key = `${uName}||${prod}||${v.shift}||${spec}`;
-          if (!groups[key]) {
-            groups[key] = {
-              user_name: uName,
+    if (rawVisits && rawVisits.length > 0 && rawVisits.some(v => v.products)) {
+      const filteredVisits = filterByTimeGrain(rawVisits);
+      const map = new Map();
+      filteredVisits.forEach(v => {
+        if (!v.products) return;
+        const u = v.user || v.user_name || 'Unknown';
+        const spec = v.specialty || 'General';
+        const shft = v.shift || 'AM';
+        const prods = v.products.split(',').map(p => p.trim()).filter(Boolean);
+        prods.forEach(prod => {
+          const key = `${u}||${spec}||${prod}||${shft}`;
+          if (!map.has(key)) {
+            map.set(key, {
+              user_name: u,
               employee_code: v.employee_code,
-              product: prod,
-              shift: v.shift,
               specialty: spec,
-              team: v.team || '',
+              product: prod,
+              shift: shft,
               call_count: 0,
-              _docs: new Set()
-            };
+              team: userTeamMap[u.toLowerCase().trim()] || v.team || ''
+            });
           }
-          groups[key].call_count += 1;
-          if (v.doctor_key || v.doctor_name) groups[key]._docs.add(v.doctor_key || v.doctor_name);
+          map.get(key).call_count += 1;
         });
       });
-      sourceData = Object.values(groups).map(g => ({
-        ...g,
-        unique_doctors: g._docs.size
-      }));
+      let r = Array.from(map.values());
+      r = byManagerTerritory(byLineManager(byTeam(r)));
+      if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
+      if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
+      if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
+      return r;
     }
 
-    let r = byManagerTerritory(byLineManager(byTeam(sourceData)));
+    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(products))));
     if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
     if (userFilter !== 'all') {
       const targetNames = new Set([userFilter]);
@@ -1458,14 +1379,11 @@ export default function Dashboard() {
       });
       r = r.filter(x => targetNames.has(x.user_name));
     }
-
-    // Exclude managers from team totals unless explicitly filtered to a single manager
     if (userFilter === 'all') {
       r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
     }
-
     return r;
-  }, [products, rawVisits, timeGrain, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames]);
+  }, [rawVisits, products, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
 
   const visibleNames = useMemo(() => {
     if (!hierarchy?.length || !visibleCodes?.length) return null;
@@ -1505,28 +1423,24 @@ export default function Dashboard() {
     return r;
   }, [coaching, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, visibleNames, profile, hierarchy]);
 
-  // ── Timing data: last visit time per rep per day (PM ONLY) ──────────────────────
+  // ── Timing data: last visit time per rep per day ──────────────────────
   const timingData = useMemo(() => {
     if (!rawVisits?.length) return [];
-
-    // Identify dates where a user had a PM Activity or PM Office Work
-    const pmActivityDates = new Set();
+    
+    // Identify dates where a user had an Activity or Office Work
+    const activityDates = new Set();
     rawVisits.forEach(v => {
-      if (v.shift === 'PM') {
-        const cat1 = (v.acc_type_category || '').toLowerCase();
-        const cat2 = (v.visit_type_category || '').toLowerCase();
-        const raw = (v.acc_type_raw || '').toLowerCase();
-        const isActivityOrOffice = cat1.includes('activity') || cat1.includes('office') ||
-          cat2.includes('activity') || cat2.includes('office') ||
-          raw.includes('activity') || raw.includes('office');
-        if (isActivityOrOffice && v.user && v.visit_date) {
-          pmActivityDates.add(`${v.user}|||${v.visit_date}`);
-        }
+      const isActivity = (v.acc_type_category || '').toLowerCase().includes('activity') || 
+                         (v.acc_type_category || '').toLowerCase().includes('office') ||
+                         (v.visit_type_category || '').toLowerCase().includes('activity') ||
+                         (v.visit_type_category || '').toLowerCase().includes('office');
+      if (isActivity && v.user && v.visit_date) {
+        activityDates.add(`${v.user}|||${v.visit_date}`);
       }
     });
 
-    // Condition: Last recorded PM visit ONLY (shift === 'PM'), ignoring AM visits
-    const validVisits = rawVisits.filter(v => v.visit_date && v.visit_time && v.shift === 'PM');
+    // Include all visits, no longer filtered to PM Clinic only
+    const validVisits = rawVisits.filter(v => v.visit_date && v.visit_time);
 
     // Group by user + date, find latest time
     const byUserDate = {};
@@ -1535,9 +1449,9 @@ export default function Dashboard() {
       const date = v.visit_date || '';
       if (!user || !date) return;
       const key = `${user}|||${date}`;
-
-      // Exclude this date entirely for this user if they had PM activity or PM office work that day!
-      if (pmActivityDates.has(key)) return;
+      
+      // Exclude this date entirely for this user if they had an activity that day!
+      if (activityDates.has(key)) return;
 
       const time = v.visit_time || '';
       if (!byUserDate[key] || time > byUserDate[key].time) {
@@ -1606,9 +1520,8 @@ export default function Dashboard() {
     return { total, early, normal, late, uniqueDays };
   }, [fTiming]);
 
-  // Timing category filter state & display limit for ultra-fast rendering
+  // Timing category filter state
   const [timingCategoryFilter, setTimingCategoryFilter] = useState('all');
-  const [timingDisplayLimit, setTimingDisplayLimit] = useState(100);
 
   const filteredTiming = useMemo(() => {
     if (timingCategoryFilter === 'all') return fTiming;
@@ -1814,14 +1727,14 @@ export default function Dashboard() {
       const sh = [['Date', 'User Name', 'Team', 'Last Visit', 'Category']];
       [...filteredTiming].forEach(r => {
         sh.push([
-          r.date || '—',
+          r.date ? formatDateDisplay(r.date) : '—',
           r.user || '—',
           r.team || '—',
           r.formattedTime || '—',
           r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
             : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
-              : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
-                : '—'
+            : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
+            : '—'
         ]);
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sh), 'Last Visit Data');
@@ -1835,7 +1748,7 @@ export default function Dashboard() {
       [...rows]
         .sort((a, b) => (a.manager_name || '').localeCompare(b.manager_name || '') || (a.coaching_date || '').localeCompare(b.coaching_date || ''))
         .forEach(r => sh.push([
-          r.manager_name || '—', r.rep_name || '—', r.coaching_date || '—', r.team || '—',
+          r.manager_name || '—', r.rep_name || '—', r.coaching_date ? formatDateDisplay(r.coaching_date) : '—', r.team || '—',
           r.am_visits || 0, r.am_accompanied || 0, r.am_visits ? Math.round((r.am_accompanied / r.am_visits) * 100) + '%' : '-',
           r.pm_visits || 0, r.pm_accompanied || 0, r.pm_visits ? Math.round((r.pm_accompanied / r.pm_visits) * 100) + '%' : '-'
         ]));
@@ -2329,7 +2242,7 @@ export default function Dashboard() {
                   onSelect={(label) => {
                     const cat = label === (t.kpi.timing_early || 'Before 3 PM') ? 'early'
                       : label === (t.kpi.timing_normal || '3 PM – 6 PM') ? 'normal'
-                        : label === (t.kpi.timing_late || 'After 6 PM') ? 'late' : 'all';
+                      : label === (t.kpi.timing_late || 'After 6 PM') ? 'late' : 'all';
                     setTimingCategoryFilter(prev => prev === cat ? 'all' : cat);
                   }}
                 />
@@ -2380,7 +2293,7 @@ export default function Dashboard() {
                 <span className="ctrl-lbl">{rtl ? 'الفترة' : 'Period'}</span>
                 <select className="ctrl-sel" value={period} onChange={e => setPeriod(e.target.value)}>
                   {availablePeriods.map(p => (
-                    <option key={p} value={p}>{p}</option>
+                    <option key={p} value={p}>{formatDateDisplay(p)}</option>
                   ))}
                 </select>
               </div>
@@ -2394,8 +2307,20 @@ export default function Dashboard() {
                   <option value="week2">{rtl ? 'الأسبوع الثاني (8–14)' : 'Week 2 (8–14)'}</option>
                   <option value="week3">{rtl ? 'الأسبوع الثالث (15–21)' : 'Week 3 (15–21)'}</option>
                   <option value="week4">{rtl ? 'الأسبوع الرابع (22–31)' : 'Week 4 (22–31)'}</option>
+                  <option value="daily">{rtl ? 'يوم محدد' : 'Specific Day'}</option>
                 </select>
               </div>
+              {timeGrain === 'daily' && (
+                <div className="ctrl-group">
+                  <span className="ctrl-lbl">{rtl ? 'التاريخ' : 'Date'}</span>
+                  <input
+                    type="date"
+                    className="ctrl-sel"
+                    value={selectedDate}
+                    onChange={e => setSelectedDate(e.target.value)}
+                  />
+                </div>
+              )}
               <div className="ctrl-group">
                 <span className="ctrl-lbl">{rtl ? 'الوردية' : 'Shift'}</span>
                 <ShiftToggle value={shift} onChange={setShift} t={t} />
@@ -2519,13 +2444,13 @@ export default function Dashboard() {
                           const roleLower = String(rawRole).toLowerCase();
                           const roleClass = roleLower.includes('area') ? 'hdr-role-am'
                             : (roleLower.includes('supervisor') || roleLower.includes('sup')) ? 'hdr-role-sup'
-                              : roleLower.includes('blm') ? 'hdr-role-blm'
-                                : 'hdr-role-mr';
+                            : roleLower.includes('blm') ? 'hdr-role-blm'
+                            : 'hdr-role-mr';
 
                           const roleLabel = roleLower.includes('area') ? (rtl ? 'مدير منطقة' : 'Area Manager')
                             : (roleLower.includes('supervisor') || roleLower.includes('sup')) ? (rtl ? 'مشرف' : 'Supervisor')
-                              : roleLower.includes('blm') ? (rtl ? 'مدير خط' : 'BLM')
-                                : (rtl ? 'مندوب' : 'MR');
+                            : roleLower.includes('blm') ? (rtl ? 'مدير خط' : 'BLM')
+                            : (rtl ? 'مندوب' : 'MR');
 
                           return (
                             <div key={r.id || i} className={`ucard ${roleClass}${r.is_manager ? ' mgr' : ''}${selectedRep === r.user_name ? ' ucard-selected' : ''}`}
@@ -2578,12 +2503,12 @@ export default function Dashboard() {
                                   </div>
                                 );
                               })}
-                              {r.product_calls_detail && shift !== 'AM' && (
-                                <div className="kpi-sec">
-                                  <div className="kpi-sec-hd">{rtl ? 'تفاصيل المنتج' : 'Product Detail'}</div>
-                                  <div className="prod-det">{r.product_calls_detail}</div>
-                                </div>
-                              )}
+                            {r.product_calls_detail && shift !== 'AM' && (
+                              <div className="kpi-sec">
+                                <div className="kpi-sec-hd">{rtl ? 'تفاصيل المنتج' : 'Product Detail'}</div>
+                                <div className="prod-det">{r.product_calls_detail}</div>
+                              </div>
+                            )}
                             </div>
                           );
                         })}
@@ -2596,36 +2521,80 @@ export default function Dashboard() {
               {/* SPECIALTY TAB */}
               {tab === 'specialty' && (
                 <>
-                  <PivotSummaryBanner
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <div style={{ flex: 1 }}>
+                      <PivotSummaryBanner
+                        rows={fSpecialty}
+                        valueKey="call_count"
+                        rowKey="specialty"
+                        shift={shift}
+                        t={t}
+                        selectedTeam={team}
+                        onSelectTeam={setTeam}
+                        userTeamMap={userTeamMap}
+                      />
+                    </div>
+                    <div className="shift-toggle" style={{ marginLeft: '12px', flexShrink: 0 }}>
+                      <button className={`stoggle${specPivotMode === 'class' ? ' on' : ''}`} onClick={() => setSpecPivotMode('class')}>
+                        📊 {rtl ? 'التخصص × التصنيف' : 'Specialty × Classification'}
+                      </button>
+                      <button className={`stoggle${specPivotMode === 'user' ? ' on' : ''}`} onClick={() => setSpecPivotMode('user')}>
+                        👤 {rtl ? 'التخصص × المندوب' : 'Specialty × Rep'}
+                      </button>
+                    </div>
+                  </div>
+                  <PivotTable
                     rows={fSpecialty}
-                    valueKey="call_count"
                     rowKey="specialty"
-                    shift={shift}
-                    t={t}
-                    selectedTeam={team}
-                    onSelectTeam={setTeam}
-                    userTeamMap={userTeamMap}
+                    colKey={specPivotMode === 'class' ? 'classification' : 'user_name'}
+                    valueKey="call_count"
+                    shiftFilter={shift}
+                    userFilter={userFilter}
+                    searchFilter={search}
+                    lang={lang}
+                    hideAvg={specPivotMode === 'class'}
+                    colTitle={specPivotMode === 'class' ? (rtl ? 'التصنيف' : 'Classification') : (rtl ? 'المندوب' : 'Rep')}
                   />
-                  <PivotTable rows={fSpecialty} rowKey="specialty" valueKey="call_count"
-                    shiftFilter={shift} userFilter={userFilter} searchFilter={search} lang={lang} hideAvg={true} />
                 </>
               )}
 
               {/* PRODUCTS TAB */}
               {tab === 'products' && (
                 <>
-                  <PivotSummaryBanner
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <div style={{ flex: 1 }}>
+                      <PivotSummaryBanner
+                        rows={fProducts}
+                        valueKey="call_count"
+                        rowKey="product"
+                        shift={shift}
+                        t={t}
+                        selectedTeam={team}
+                        onSelectTeam={setTeam}
+                        userTeamMap={userTeamMap}
+                      />
+                    </div>
+                    <div className="shift-toggle" style={{ marginLeft: '12px', flexShrink: 0 }}>
+                      <button className={`stoggle${prodPivotMode === 'spec' ? ' on' : ''}`} onClick={() => setProdPivotMode('spec')}>
+                        💊 {rtl ? 'المنتج × التخصص' : 'Product × Specialty'}
+                      </button>
+                      <button className={`stoggle${prodPivotMode === 'user' ? ' on' : ''}`} onClick={() => setProdPivotMode('user')}>
+                        👤 {rtl ? 'المنتج × المندوب' : 'Product × Rep'}
+                      </button>
+                    </div>
+                  </div>
+                  <PivotTable
                     rows={fProducts}
-                    valueKey="call_count"
                     rowKey="product"
-                    shift={shift}
-                    t={t}
-                    selectedTeam={team}
-                    onSelectTeam={setTeam}
-                    userTeamMap={userTeamMap}
+                    colKey={prodPivotMode === 'spec' ? 'specialty' : 'user_name'}
+                    valueKey="call_count"
+                    shiftFilter={shift}
+                    userFilter={userFilter}
+                    searchFilter={search}
+                    lang={lang}
+                    hideAvg={false}
+                    colTitle={prodPivotMode === 'spec' ? (rtl ? 'التخصص' : 'Specialty') : (rtl ? 'المندوب' : 'Rep')}
                   />
-                  <PivotTable rows={fProducts} rowKey="product" valueKey="call_count"
-                    shiftFilter={shift} userFilter={userFilter} searchFilter={search} lang={lang} />
                 </>
               )}
 
@@ -2668,7 +2637,7 @@ export default function Dashboard() {
                             <tr key={r.id || i}>
                               <td className="s-col">{r.manager_name}</td>
                               <td className="rep-col">{r.rep_name}</td>
-                              <td>{r.coaching_date}</td>
+                              <td>{formatDateDisplay(r.coaching_date)}</td>
                               <td>{r.team || '—'}</td>
                               <td>{r.am_visits || 0}</td>
                               <td>{r.am_accompanied || 0}</td>
@@ -2720,62 +2689,37 @@ export default function Dashboard() {
                     </div>
 
                     {/* Timing Detail Table */}
-                    {userFilter === 'all' && !selectedRep ? (
-                      <div className="timing-prompt-card">
-                        <div className="timing-prompt-icon">👤</div>
-                        <div className="timing-prompt-title">
-                          {rtl ? 'اختر مندوباً لعرض سجل الزيارات الأخيرة' : 'Select an Employee to View Last Visit Log'}
-                        </div>
-                        <div className="timing-prompt-desc">
-                          {rtl ? 'تم عرض إحصائيات ونسب الفئات أعلاه. يرجى اختيار مندوب محدد من القائمة أو الشريط الجانبي لعرض سجل زياراته اليومي.'
-                            : 'High-level category insights are summarized above. Select a specific employee from the REP dropdown or sidebar to inspect their exact daily last visit records.'}
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="pivot-wrap">
-                          <table className="pivot-tbl timing-tbl">
-                            <thead>
-                              <tr>
-                                <th className="s-col">{rtl ? 'التاريخ' : 'Date'}</th>
-                                <th>{rtl ? 'المندوب' : 'Rep'}</th>
-                                <th>{rtl ? 'الفريق' : 'Team'}</th>
-                                <th>{rtl ? 'آخر زيارة' : 'Last Visit'}</th>
-                                <th>{rtl ? 'الفئة' : 'Category'}</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {filteredTiming.slice(0, timingDisplayLimit).map((r, i) => (
-                                <tr key={`${r.user}-${r.date}-${i}`} className={`timing-row timing-row-${r.category}`}>
-                                  <td className="s-col">{r.date}</td>
-                                  <td>{r.user}</td>
-                                  <td>{r.team || '—'}</td>
-                                  <td className="timing-time">{r.formattedTime}</td>
-                                  <td>
-                                    <span className={`timing-badge timing-badge-${r.category}`}>
-                                      {r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
-                                        : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
-                                          : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
-                                            : '—'}
-                                    </span>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        {filteredTiming.length > timingDisplayLimit && (
-                          <div className="timing-load-more">
-                            <button className="timing-btn-more" onClick={() => setTimingDisplayLimit(prev => prev + 200)}>
-                              {rtl ? `عرض المزيد (عرض ${timingDisplayLimit} من إجمالي ${filteredTiming.length})` : `Show More (Showing ${timingDisplayLimit} of ${filteredTiming.length} records)`}
-                            </button>
-                            <button className="timing-btn-all" onClick={() => setTimingDisplayLimit(filteredTiming.length)}>
-                              {rtl ? 'عرض الكل' : 'Show All'}
-                            </button>
-                          </div>
-                        )}
-                      </>
-                    )}
+                    <div className="pivot-wrap">
+                      <table className="pivot-tbl timing-tbl">
+                        <thead>
+                          <tr>
+                            <th className="s-col">{rtl ? 'التاريخ' : 'Date'}</th>
+                            <th>{rtl ? 'المندوب' : 'Rep'}</th>
+                            <th>{rtl ? 'الفريق' : 'Team'}</th>
+                            <th>{rtl ? 'آخر زيارة' : 'Last Visit'}</th>
+                            <th>{rtl ? 'الفئة' : 'Category'}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredTiming.map((r, i) => (
+                            <tr key={`${r.user}-${r.date}-${i}`} className={`timing-row timing-row-${r.category}`}>
+                              <td className="s-col">{formatDateDisplay(r.date)}</td>
+                              <td>{r.user}</td>
+                              <td>{r.team || '—'}</td>
+                              <td className="timing-time">{r.formattedTime}</td>
+                              <td>
+                                <span className={`timing-badge timing-badge-${r.category}`}>
+                                  {r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
+                                    : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
+                                    : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
+                                    : '—'}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </>
                 )
               )}

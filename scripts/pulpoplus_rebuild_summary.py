@@ -955,6 +955,32 @@ def save_output(summary_df, records, output_path,
                 user_codes.append("")
         raw_df.insert(raw_df.columns.get_loc("user") + 1, "user_code", user_codes)
 
+    def _format_date_col(df, col_name):
+        if df is None or df.empty or col_name not in df.columns:
+            return df
+        df = df.copy()
+        def _fmt(val):
+            if val is None or pd.isna(val) or not str(val).strip():
+                return ""
+            s = str(val).strip()
+            try:
+                dt = datetime.strptime(s[:10], "%Y-%m-%d")
+                return dt.strftime("%b %d, %Y")
+            except ValueError:
+                pass
+            return s
+        df[col_name] = df[col_name].apply(_fmt)
+        return df
+
+    s_df = _format_date_col(s_df, "Date")
+    cd_df = _format_date_col(cd_df, "Date")
+    if cd_df is not None and "Coaching Date" in cd_df.columns:
+        cd_df = _format_date_col(cd_df, "Coaching Date")
+    timing_df_fmt = _format_date_col(timing_df, "Date") if timing_df is not None else None
+    raw_df_fmt = _format_date_col(raw_df, "date") if not raw_df.empty else raw_df
+    if raw_df_fmt is not None and "Date" in raw_df_fmt.columns:
+        raw_df_fmt = _format_date_col(raw_df_fmt, "Date")
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         s_df.to_excel(writer, sheet_name="Summary", index=False)
         style_worksheet(writer.sheets["Summary"], len(s_df), len(s_df.columns), freeze_cell="D2")
@@ -975,14 +1001,14 @@ def save_output(summary_df, records, output_path,
             style_worksheet(writer.sheets["Coaching Days"], len(cd_df), len(cd_df.columns))
             print(f"   ✓ Coaching Days:      {len(cd_df)} rows")
 
-        if timing_df is not None and not timing_df.empty:
-            t_df = _inject_user_code(timing_df, hmap, user_col="User")
+        if timing_df_fmt is not None and not timing_df_fmt.empty:
+            t_df = _inject_user_code(timing_df_fmt, hmap, user_col="User")
             t_df.to_excel(writer, sheet_name="Timing", index=False)
             style_worksheet(writer.sheets["Timing"], len(t_df), len(t_df.columns))
             print(f"   ✓ Timing:             {len(t_df)} rows")
 
-        if not raw_df.empty:
-            raw_df.to_excel(writer, sheet_name="Raw Data", index=False)
+        if raw_df_fmt is not None and not raw_df_fmt.empty:
+            raw_df_fmt.to_excel(writer, sheet_name="Raw Data", index=False)
             style_worksheet(writer.sheets["Raw Data"], len(raw_df), len(raw_df.columns))
             print(f"   ✓ Raw Data:           {len(raw_df)} records")
 

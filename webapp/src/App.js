@@ -6,13 +6,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import Login from './components/Login';
 import './App.css';
 
-// Code-split the heavy routes. Previously every one of these was a static
-// import, so a user landing on /login downloaded the 2,800-line Dashboard,
-// the AdminPanel and the whole charting library before the login form could
-// paint. Now each route's JS is fetched only when that route is opened.
-//
-// Login is deliberately NOT lazy: it is the first thing most visits render,
-// and splitting it would add a network round trip to the critical path.
+// Code-split the heavy routes.
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const AdminPanel = lazy(() => import('./pages/AdminPanel'));
 const ChangePassword = lazy(() => import('./components/ChangePassword'));
@@ -67,7 +61,6 @@ function RootRoute() {
   const { session, profile, loading } = useAuth();
   if (loading) return <Spinner />;
   if (!session || !profile) return <Navigate to="/login" replace />;
-  // All roles (including Admin) land on the dashboard by default
   return <Navigate to="/dashboard" replace />;
 }
 
@@ -76,7 +69,6 @@ function AppContent() {
 
   if (loading) return <Spinner />;
 
-  // If logged in but needs to change default password
   if (session && profile?.is_default_password) {
     return (
       <HashRouter>
@@ -91,8 +83,6 @@ function AppContent() {
 
   return (
     <HashRouter>
-      {/* One Suspense boundary around the whole route table: any lazy route
-          shows the same spinner while its chunk downloads. */}
       <Suspense fallback={<Spinner />}>
         <Routes>
           <Route path="/login" element={<LoginRoute />} />
