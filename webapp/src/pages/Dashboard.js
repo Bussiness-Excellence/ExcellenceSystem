@@ -880,11 +880,10 @@ export default function Dashboard() {
         let visitsQuery = supabase.from('visits')
           .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products')
           .in('employee_code', codes);
-        if (periodLabel) {
-          visitsQuery = visitsQuery.eq('period', periodLabel);
-        }
         if (rangeStart && rangeEnd) {
           visitsQuery = visitsQuery.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
+        } else if (periodLabel) {
+          visitsQuery = visitsQuery.eq('period', periodLabel);
         }
         return visitsQuery;
       })()
