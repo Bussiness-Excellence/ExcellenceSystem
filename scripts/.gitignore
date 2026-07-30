@@ -44,3 +44,6 @@ hierarchy/*.sql
 Thumbs.db
 .idea/
 .vscode/
+
+.vercel
+.env*

@@ -414,6 +414,19 @@ def parse_visits_report(path, team="", debug=False):
     return records
 
 
+def infer_team_from_filename(filename):
+    base = os.path.basename(filename)
+    stem = os.path.splitext(base)[0]
+    # Remove date patterns like "July 2026 - " or "2026-07 - "
+    clean_stem = re.sub(r'^(?:[A-Za-z]+\s+\d{4}|\d{4}[-_]\d{2})\s*[-_]?\s*', '', stem)
+    # Remove suffix keywords like _rebuilt, _report, visits
+    clean_stem = re.sub(r'[-_](?:rebuilt|report|visits|export)$', '', clean_stem, flags=re.I)
+    clean_stem = clean_stem.strip()
+    if clean_stem and clean_stem.lower() not in {"visits", "report", "actual visits report"}:
+        return clean_stem.title()
+    return ""
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -461,10 +474,24 @@ def main():
         enriched = hmap.enrich_records(records, warn=args.debug)
         print(f"   ✓ {enriched} record(s) assigned a team from hierarchy")
 
+    # Auto-infer team from filename if records still lack team assignments
+    unassigned = sum(1 for r in records if not r.get("team"))
+    if unassigned > 0:
+        inferred = infer_team_from_filename(args.input)
+        if inferred:
+            for r in records:
+                if not r.get("team"):
+                    r["team"] = inferred
+            print(f"   ✓ Inferred Team = '{inferred}' from filename for {unassigned} record(s)")
+
     if not out_path:
-        base = args.input.rsplit(".", 1)[0]
-        out_path = reb.auto_output_filename(records, fallback_base=base)
-        print(f"   📄 Auto-named output: {out_path}")
+        filename = reb.auto_output_filename(records, fallback_base=os.path.splitext(os.path.basename(args.input))[0])
+        recent_dir = os.environ.get("PERIOD_RECENT_DIR", r"E:\crm extractor\Periods\recent")
+        if os.path.isdir(recent_dir):
+            out_path = os.path.join(recent_dir, filename)
+        else:
+            out_path = filename
+        print(f"   📄 Auto-named output destination: {out_path}")
 
     print("\n🌍 Backfilling territory...")
     reb.backfill_territory(records, debug=args.debug)
@@ -480,14 +507,18 @@ def main():
     for mgr, days in sorted(coaching_days_by_manager.items()):
         print(f"   {mgr}: {days} coaching day(s)")
 
-    print("\n📊 Computing per-user summary...")
+    print("\n📊 Computing per-user-per-day summary...")
     summary_df = reb.compute_summary(
         records,
         managers=managers,
         coaching_days_by_manager=coaching_days_by_manager,
         coaching_detail_df=coaching_detail_df,
         debug=args.debug,
+        group_by_date=True,
     )
+
+    print("\n🕐 Computing timing report (last visit per day)...")
+    timing_df = reb.compute_timing_report(records)
 
     print("\n🔬 Computing specialty × classification...")
     spec_df = reb.compute_specialty_classification(records)
@@ -501,6 +532,7 @@ def main():
         product_df=prod_df,
         coaching_detail_df=coaching_detail_df,
         hmap=hmap,
+        timing_df=timing_df,
     )
 
 

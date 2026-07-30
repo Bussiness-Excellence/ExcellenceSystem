@@ -77,13 +77,22 @@ def _headers(key, prefer=None):
 
 def supabase_delete_where(url, key, table, column, value):
     """DELETE rows from `table` where `column` = `value`."""
-    resp = requests.delete(
-        f"{url}/rest/v1/{table}",
-        headers=_headers(key),
-        params={column: f"eq.{value}"},
-    )
-    if not resp.ok:
-        raise RuntimeError(f"Delete failed on {table}: {resp.status_code} {resp.text}")
+    import time
+    for attempt in range(5):
+        try:
+            resp = requests.delete(
+                f"{url}/rest/v1/{table}",
+                headers=_headers(key),
+                params={column: f"eq.{value}"},
+                timeout=30,
+            )
+            if resp.ok:
+                return
+            err = f"{resp.status_code} {resp.text}"
+        except Exception as exc:
+            err = str(exc)
+        time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"Delete failed on {table}: {err}")
 
 
 def supabase_delete_all(url, key, table):
@@ -110,19 +119,33 @@ def supabase_insert(url, key, table, rows, upsert_on=None):
         prefer = f"resolution=merge-duplicates,return=minimal"
         params["on_conflict"] = upsert_on
 
+    import time
     total = 0
     for i in range(0, len(rows), CHUNK_SIZE):
         chunk = rows[i:i + CHUNK_SIZE]
-        resp = requests.post(
-            f"{url}/rest/v1/{table}",
-            headers=_headers(key, prefer=prefer),
-            params=params,
-            json=chunk,
-        )
-        if not resp.ok:
+        success = False
+        last_error = None
+        for attempt in range(5):
+            try:
+                resp = requests.post(
+                    f"{url}/rest/v1/{table}",
+                    headers=_headers(key, prefer=prefer),
+                    params=params,
+                    json=chunk,
+                    timeout=30,
+                )
+                if resp.ok:
+                    success = True
+                    break
+                else:
+                    last_error = f"{resp.status_code} {resp.text}"
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(2 * (attempt + 1))
+
+        if not success:
             raise RuntimeError(
-                f"Insert failed on {table} (rows {i}-{i+len(chunk)}): "
-                f"{resp.status_code} {resp.text}"
+                f"Insert failed on {table} (rows {i}-{i+len(chunk)}): {last_error}"
             )
         total += len(chunk)
     return total

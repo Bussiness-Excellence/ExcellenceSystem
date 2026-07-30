@@ -1,21 +1,17 @@
 /**
  * check_visits.js — quick lookup of a user's visits on a given date.
  *
- * FIXED:
- *  - User and date are arguments rather than being hardcoded to two people
- *    and one day.
- *  - Uses the shared config loader, so credentials and the missing-env error
- *    message are consistent with the rest of the scripts.
- *  - Reports query errors instead of silently printing "undefined".
+ * Uses native Node fetch & config helpers (zero npm dependencies required).
  *
  * Usage:
- *   node check_visits.js "Maher Abd Elfattah" 2026-07-01
- *   node check_visits.js "Maher Abd Elfattah" 2026-07-01 "Abdullah ahmed mohamed Abdelaal"
+ *   node scripts/check_visits.js "Maher Abd Elfattah" 2026-07-01
+ *   node scripts/check_visits.js "Maher Abd Elfattah" 2026-07-01 "Abdullah ahmed mohamed Abdelaal"
  */
 
-const { getAnonClient } = require('./config');
+const { getUrl, getAnonKey } = require('./config');
 
-const supabase = getAnonClient();
+const supabaseUrl = getUrl();
+const supabaseKey = getAnonKey();
 
 const [, , ...args] = process.argv;
 const date = args.find(a => /^\d{4}-\d{2}-\d{2}$/.test(a));
@@ -28,16 +24,22 @@ if (!users.length || !date) {
 
 async function check() {
     for (const user of users) {
-        const { data, error } = await supabase
-            .from('visits')
-            .select('*')
-            .eq('user', user)
-            .eq('visit_date', date);
+        const queryUrl = `${supabaseUrl}/rest/v1/visits?user=eq.${encodeURIComponent(user)}&visit_date=eq.${encodeURIComponent(date)}&select=*`;
+        
+        const res = await fetch(queryUrl, {
+            headers: {
+                'apikey': supabaseKey,
+                'Authorization': `Bearer ${supabaseKey}`
+            }
+        });
 
-        if (error) {
-            console.error(`Query failed for ${user}: ${error.message}`);
+        if (!res.ok) {
+            const errText = await res.text();
+            console.error(`Query failed for ${user}: ${res.status} ${errText}`);
             continue;
         }
+
+        const data = await res.json();
 
         console.log(`\n${user} — ${date}: ${data.length} visit(s)`);
         data.forEach((v, i) => {
@@ -48,7 +50,6 @@ async function check() {
         });
 
         // Repeated identical rows here are the signature of the duplicate bug
-        // fixed in pulpoplus_upload_to_supabase.py and emergency_upload.js.
         const seen = new Map();
         for (const v of data) {
             const k = `${v.visit_time}|${v.acc_id}|${v.doctor_key}`;
@@ -56,7 +57,9 @@ async function check() {
         }
         const dupes = [...seen.entries()].filter(([, n]) => n > 1);
         if (dupes.length) {
-            console.warn(`  WARNING: ${dupes.length} duplicated visit(s) for this user/date.`);
+            console.warn(`  ⚠️ WARNING: ${dupes.length} duplicated visit(s) for this user/date.`);
+        } else if (data.length > 0) {
+            console.log(`  ✅ No duplicate visits found.`);
         }
     }
 }

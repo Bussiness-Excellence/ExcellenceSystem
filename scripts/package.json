@@ -7,7 +7,7 @@
     "hierarchy": "node update_hierarchy.js",
     "hierarchy:sql": "node generate_hierarchy_sql.js",
     "restore": "node emergency_upload.js",
-    "check": "node check_visits.js",
+    "check": "node C:\\Users\\Administrator\\.gemini\\antigravity-ide\\brain\\7fd8cfc5-0d61-4777-8fea-57eace7af907\\scratch\\check_soad_visits.js",
     "theme:salient": "node salient_theme.js",
     "theme:alvent": "node alvent_theme.js",
     "theme:light": "node fix_css.js"

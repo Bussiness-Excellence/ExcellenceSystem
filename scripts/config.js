@@ -13,16 +13,47 @@
 const path = require('path');
 const fs = require('fs');
 
-// Load .env from this folder, then from the parent, so the scripts work
-// whether they live in the repo root or in a scripts/ subfolder.
+// Add webapp/node_modules to module paths so dependencies are resolved
+const webappNodeModules = path.join(__dirname, '..', 'webapp', 'node_modules');
+if (fs.existsSync(webappNodeModules) && !module.paths.includes(webappNodeModules)) {
+    module.paths.push(webappNodeModules);
+}
+
+// Zero-dependency .env loader (falls back gracefully if dotenv is missing)
 const candidates = [
     path.join(__dirname, '.env'),
     path.join(__dirname, '..', '.env'),
 ];
 for (const p of candidates) {
     if (fs.existsSync(p)) {
-        require('dotenv').config({ path: p });
+        try {
+            require('dotenv').config({ path: p });
+        } catch (e) {
+            // Manual parse fallback if dotenv module is not installed
+            const content = fs.readFileSync(p, 'utf8');
+            content.split(/\r?\n/).forEach(line => {
+                line = line.trim();
+                if (!line || line.startsWith('#') || !line.includes('=')) return;
+                const idx = line.indexOf('=');
+                const k = line.slice(0, idx).trim();
+                let v = line.slice(idx + 1).trim();
+                if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+                    v = v.slice(1, -1);
+                }
+                if (!process.env[k]) {
+                    process.env[k] = v;
+                }
+            });
+        }
         break;
+    }
+}
+
+function loadSupabaseModule() {
+    try {
+        return require('@supabase/supabase-js');
+    } catch (e) {
+        return require(path.join(__dirname, '..', 'webapp', 'node_modules', '@supabase', 'supabase-js'));
     }
 }
 
@@ -78,14 +109,14 @@ function safeJwtPayload(token) {
 }
 
 function getServiceClient() {
-    const { createClient } = require('@supabase/supabase-js');
+    const { createClient } = loadSupabaseModule();
     return createClient(getUrl(), getServiceKey(), {
         auth: { persistSession: false, autoRefreshToken: false },
     });
 }
 
 function getAnonClient() {
-    const { createClient } = require('@supabase/supabase-js');
+    const { createClient } = loadSupabaseModule();
     return createClient(getUrl(), getAnonKey(), {
         auth: { persistSession: false, autoRefreshToken: false },
     });
