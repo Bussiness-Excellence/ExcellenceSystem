@@ -584,15 +584,36 @@ export default function Dashboard() {
   const normalizeDateStr = useCallback((dStr) => {
     if (!dStr) return '';
     const s = String(dStr).trim();
+    
+    // ISO format: YYYY-MM-DD or YYYY/MM/DD
     let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-    if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+    if (m) {
+      const yr = m[1];
+      const mo = String(m[2]).padStart(2, '0');
+      const da = String(m[3]).padStart(2, '0');
+      return `${yr}-${mo}-${da}`;
+    }
+
+    // Standard CRM format: DD/MM/YYYY or MM/DD/YYYY
     m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
     if (m) {
       const p1 = parseInt(m[1], 10);
       const p2 = parseInt(m[2], 10);
-      if (p1 > 12) return `${m[3]}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
-      return `${m[3]}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+      const yr = m[3];
+      
+      let day, month;
+      if (p2 > 12) {
+        // MM/DD/YYYY format: p1 is month, p2 is day (e.g. 07/18/2026)
+        month = p1;
+        day = p2;
+      } else {
+        // Standard DD/MM/YYYY format: p1 is day, p2 is month (e.g. 08/07/2026)
+        day = p1;
+        month = p2;
+      }
+      return `${yr}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
+
     return s;
   }, []);
 
@@ -600,13 +621,14 @@ export default function Dashboard() {
     if (!rows || !rows.length || timeGrain === 'all') return rows;
     return rows.filter(r => {
       const rawDate = r.visit_date || r.coaching_date || r.date;
-      if (!rawDate) return true;
+      if (!rawDate) return false;
       const isoDate = normalizeDateStr(rawDate);
-      if (!isoDate) return true;
+      if (!isoDate) return false;
 
       const parts = isoDate.split('-');
-      if (parts.length < 3) return true;
+      if (parts.length < 3) return false;
       const day = parseInt(parts[2], 10);
+      if (isNaN(day)) return false;
 
       if (timeGrain === 'biweekly1') return day >= 1 && day <= 15;
       if (timeGrain === 'biweekly2') return day >= 16 && day <= 31;
