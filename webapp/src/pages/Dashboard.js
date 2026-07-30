@@ -764,7 +764,7 @@ export default function Dashboard() {
     if (!visibleCodes?.length) { setLoading(false); return; }
     const isAdmin = profile?.role === 'Admin';
     const codes = visibleCodes;
-    const cacheKey = `dash_${periodLabel}_${isMgr}`;
+    const cacheKey = `dash_v2_${periodLabel}_${isMgr}`;
 
     // Skip if already fetched this key (tab switch won't retrigger)
     if (!force && fetchedKeyRef.current === currentKey) return;
@@ -837,10 +837,10 @@ export default function Dashboard() {
 
       while (true) {
         let q = supabase.from('visits').select(selectCols);
-        if (startDate && endDate) {
-          q = q.gte('visit_date', startDate).lte('visit_date', endDate);
-        } else if (periodLabel) {
+        if (periodLabel) {
           q = q.eq('period', periodLabel);
+        } else if (startDate && endDate) {
+          q = q.gte('visit_date', startDate).lte('visit_date', endDate);
         }
         q = q.range(page * pageSize, (page + 1) * pageSize - 1);
         const { data, error } = await q;
