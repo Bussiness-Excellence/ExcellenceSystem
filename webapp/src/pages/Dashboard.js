@@ -380,36 +380,25 @@ function TeamBriefCard({ rows, teamLabel, rtl, t, shift, isMgr, onSelectTeam }) 
 // ── PivotSummaryBanner ───────────────────────────────────────────────────────
 function PivotSummaryBanner({ rows, valueKey, rowKey, shift, t, selectedTeam, onSelectTeam, userTeamMap }) {
   const filtered = useMemo(() => shift === 'all' ? rows : rows.filter(r => r.shift === shift), [rows, shift]);
+
+  const grandTotal = useMemo(() => filtered.reduce((s, r) => s + (r[valueKey] || 0), 0), [filtered, valueKey]);
+  const activeRepsCount = useMemo(() => new Set(filtered.map(r => r.user_name).filter(Boolean)).size, [filtered]);
+
   const byTeam = useMemo(() => {
     const m = {};
-    if (userTeamMap) {
-      Object.entries(userTeamMap).forEach(([userName, teamStr]) => {
-        if (!teamStr || teamStr === 'Unknown') return;
-        const tms = (typeof teamStr === 'string') ? teamStr.split('; ') : [teamStr];
-        tms.forEach(team => {
-          if (!m[team]) m[team] = { total: 0, users: new Set() };
-          m[team].users.add(userName);
-        });
-      });
-    }
     filtered.forEach(r => {
-      const teamStr = (r.team && r.team !== 'Unknown') ? r.team : (userTeamMap && userTeamMap[r.user_name]) || 'Other';
-      const tms = (typeof teamStr === 'string') ? teamStr.split('; ') : [teamStr];
-      tms.forEach(team => {
-        if (!m[team]) m[team] = { total: 0, users: new Set() };
-        m[team].total += (r[valueKey] || 0);
-        m[team].users.add(r.user_name);
-      });
+      const rawTeam = (r.team && r.team !== 'Unknown') ? r.team : (userTeamMap && userTeamMap[r.user_name]) || 'Other';
+      const primaryTeam = (typeof rawTeam === 'string') ? rawTeam.split('; ')[0].trim() : rawTeam;
+      if (!m[primaryTeam]) m[primaryTeam] = { total: 0, users: new Set() };
+      m[primaryTeam].total += (r[valueKey] || 0);
+      m[primaryTeam].users.add(r.user_name);
     });
     return m;
   }, [filtered, valueKey, userTeamMap]);
-  const grandTotal = useMemo(() => filtered.reduce((s, r) => s + (r[valueKey] || 0), 0), [filtered, valueKey]);
-  const allUsers = useMemo(() => {
-    if (userTeamMap) return Object.keys(userTeamMap).length;
-    return new Set(filtered.map(r => r.user_name)).size;
-  }, [filtered, userTeamMap]);
-  const teamList = Object.entries(byTeam).sort((a, b) => a[0].localeCompare(b[0]));
+
+  const teamList = Object.entries(byTeam).sort((a, b) => b[1].total - a[1].total);
   if (!teamList.length) return null;
+
   return (
     <div className="pivot-banner">
       <div
@@ -419,7 +408,7 @@ function PivotSummaryBanner({ rows, valueKey, rowKey, shift, t, selectedTeam, on
       >
         <span className="pb-label">Grand Total</span>
         <span className="pb-val">{grandTotal.toLocaleString()}</span>
-        <span className="pb-sub">{allUsers} reps</span>
+        <span className="pb-sub">{activeRepsCount} active reps</span>
       </div>
       {teamList.map(([team, d]) => (
         <div key={team}
@@ -587,6 +576,27 @@ export default function Dashboard() {
   const [search, setSearch] = useState('');
   const [specPivotMode, setSpecPivotMode] = useState('class'); // 'class' | 'user'
   const [prodPivotMode, setProdPivotMode] = useState('spec');  // 'spec' | 'user'
+
+  // Auto-default selectedDate when switching to 'daily' mode if unselected
+  useEffect(() => {
+    if (timeGrain === 'daily' && !selectedDate) {
+      if (rawVisits && rawVisits.length > 0) {
+        const sortedDates = rawVisits.map(v => v.visit_date).filter(Boolean).sort();
+        if (sortedDates.length > 0) {
+          setSelectedDate(sortedDates[sortedDates.length - 1]);
+          return;
+        }
+      }
+      if (period) {
+        const pDate = new Date(`1 ${period}`);
+        if (!isNaN(pDate.getTime())) {
+          const y = pDate.getFullYear();
+          const m = String(pDate.getMonth() + 1).padStart(2, '0');
+          setSelectedDate(`${y}-${m}-15`);
+        }
+      }
+    }
+  }, [timeGrain, selectedDate, rawVisits, period]);
 
   useEffect(() => {
     async function loadPeriods() {
@@ -2312,12 +2322,19 @@ export default function Dashboard() {
               {timeGrain === 'daily' && (
                 <div className="ctrl-group">
                   <span className="ctrl-lbl">{rtl ? 'التاريخ' : 'Date'}</span>
-                  <input
-                    type="date"
-                    className="ctrl-sel"
-                    value={selectedDate}
-                    onChange={e => setSelectedDate(e.target.value)}
-                  />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <input
+                      type="date"
+                      className="ctrl-sel"
+                      value={selectedDate}
+                      onChange={e => setSelectedDate(e.target.value)}
+                    />
+                    {selectedDate && (
+                      <span className="kpi-tag" style={{ whiteSpace: 'nowrap', fontSize: '12px', background: '#3b82f6', color: '#fff', padding: '4px 8px', borderRadius: '4px' }}>
+                        📅 {formatDateDisplay(selectedDate)}
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
               <div className="ctrl-group">
