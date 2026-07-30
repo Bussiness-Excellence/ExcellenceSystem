@@ -539,8 +539,7 @@ export default function Dashboard() {
   const [availablePeriods, setAvailablePeriods] = useState([]);
   const [team, setTeam] = useState('all');
   const [shift, setShift] = useState('all'); // Default is Both
-  const [timeGrain, setTimeGrain] = useState('all'); // 'all' | 'biweekly1' | 'biweekly2' | 'week1' | 'week2' | 'week3' | 'week4' | 'daily'
-  const [selectedDate, setSelectedDate] = useState('');
+  const [timeGrain, setTimeGrain] = useState('all'); // 'all' | 'biweekly1' | 'biweekly2' | 'week1' | 'week2' | 'week3' | 'week4'
   const [search, setSearch] = useState('');
 
   useEffect(() => {
@@ -579,7 +578,6 @@ export default function Dashboard() {
     if (timeGrain === 'biweekly1' || timeGrain === 'biweekly2') return 0.50;
     if (timeGrain === 'week1' || timeGrain === 'week2' || timeGrain === 'week3') return 7 / 30;
     if (timeGrain === 'week4') return 9 / 30;
-    if (timeGrain === 'daily') return 1 / 30;
     return 1.0;
   }, [timeGrain]);
 
@@ -610,11 +608,6 @@ export default function Dashboard() {
       if (parts.length < 3) return true;
       const day = parseInt(parts[2], 10);
 
-      if (timeGrain === 'daily') {
-        if (!selectedDate) return true;
-        const normSelected = normalizeDateStr(selectedDate);
-        return isoDate === normSelected;
-      }
       if (timeGrain === 'biweekly1') return day >= 1 && day <= 15;
       if (timeGrain === 'biweekly2') return day >= 16 && day <= 31;
       if (timeGrain === 'week1') return day >= 1 && day <= 7;
@@ -623,7 +616,7 @@ export default function Dashboard() {
       if (timeGrain === 'week4') return day >= 22 && day <= 31;
       return true;
     });
-  }, [timeGrain, selectedDate, normalizeDateStr]);
+  }, [timeGrain, normalizeDateStr]);
   const [userFilter, setUser] = useState('all');
   const [tab, setTab] = useState('summary');
   const [rawSummary, setSummary] = useState([]);
@@ -775,19 +768,75 @@ export default function Dashboard() {
     if (cached) {
       try {
         const parsed = JSON.parse(cached);
-        setSummary(overrideSpecialManagers(parsed.summaries));
-        setSpecialty(overrideSpecialManagers(parsed.specialty));
-        setProducts(overrideSpecialManagers(parsed.products));
-        setCoaching(overrideSpecialManagers(parsed.coaching));
-        if (parsed.visits) setVisits(parsed.visits);
-        fetchedKeyRef.current = currentKey;
-        setLoading(false);
-        return;
+        if (parsed.visits && parsed.visits.length > 3000) {
+          setSummary(overrideSpecialManagers(parsed.summaries));
+          setSpecialty(overrideSpecialManagers(parsed.specialty));
+          setProducts(overrideSpecialManagers(parsed.products));
+          setCoaching(overrideSpecialManagers(parsed.coaching));
+          setVisits(parsed.visits);
+          fetchedKeyRef.current = currentKey;
+          setLoading(false);
+          return;
+        }
       } catch (e) { /* ignore corrupted cache */ }
     }
 
     setLoading(true); setError('');
-    const [rpcRes, teamsRes, visitsRes] = await Promise.all([
+
+    const parsePeriodToDates = (pStr) => {
+      if (!pStr) return { startDate: null, endDate: null };
+      const months = {
+        january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+        july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+      };
+      const parts = pStr.trim().split(/\s+/);
+      if (parts.length === 2) {
+        const mName = parts[0].toLowerCase();
+        const yr = parseInt(parts[1], 10);
+        if (months[mName] && !isNaN(yr)) {
+          const mNum = months[mName];
+          const mo = String(mNum).padStart(2, '0');
+          const startDate = `${yr}-${mo}-01`;
+          const lastDay = new Date(yr, mNum, 0).getDate();
+          const endDate = `${yr}-${mo}-${String(lastDay).padStart(2, '0')}`;
+          return { startDate, endDate };
+        }
+      }
+      return { startDate: null, endDate: null };
+    };
+
+    const fetchVisitsPaginated = async () => {
+      const { startDate, endDate } = parsePeriodToDates(periodLabel);
+
+      let allVisits = [];
+      let page = 0;
+      const pageSize = 1000;
+      const selectCols = 'user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products';
+
+      while (true) {
+        let q = supabase.from('visits').select(selectCols);
+        if (startDate && endDate) {
+          q = q.gte('visit_date', startDate).lte('visit_date', endDate);
+        } else if (periodLabel) {
+          q = q.eq('period', periodLabel);
+        }
+        q = q.range(page * pageSize, (page + 1) * pageSize - 1);
+        const { data, error } = await q;
+        if (error || !data || data.length === 0) break;
+        allVisits = allVisits.concat(data);
+        if (data.length < pageSize) break;
+        page++;
+        if (page > 50) break; // Cap at 50,000 rows
+      }
+
+      if (!isAdmin && codes && codes.length > 0) {
+        const codeSet = new Set(codes.map(c => String(c).trim()));
+        allVisits = allVisits.filter(v => v.employee_code && codeSet.has(String(v.employee_code).trim()));
+      }
+      return allVisits;
+    };
+
+    const [rpcRes, teamsRes, visitsData] = await Promise.all([
       supabase.rpc('get_dashboard_data', {
         p_period: periodLabel,
         p_codes: codes,
@@ -795,34 +844,10 @@ export default function Dashboard() {
         p_is_manager: isMgr
       }),
       supabase.from('teams').select('id, name'),
-      (() => {
-        // Primary: query by period column (e.g. "July 2026") — set after adding period column to visits table
-        // Fallback: date range in case older rows don't have period stamped yet
-        const periodDate = periodLabel ? new Date(`1 ${periodLabel}`) : null;
-        let q = supabase
-          .from('visits')
-          .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team')
-          .in('employee_code', codes)
-          .eq('period', periodLabel);
-        // If period doesn't parse to a valid date (e.g. "Recent"), fall back to date range
-        if (periodDate && !isNaN(periodDate.getTime())) {
-          const y = periodDate.getFullYear();
-          const mo = String(periodDate.getMonth() + 1).padStart(2, '0');
-          const startDate = `${y}-${mo}-01`;
-          const lastDay = new Date(y, periodDate.getMonth() + 1, 0).getDate();
-          const endDate = `${y}-${mo}-${String(lastDay).padStart(2, '0')}`;
-          q = supabase
-            .from('visits')
-            .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team')
-            .in('employee_code', codes)
-            .gte('visit_date', startDate)
-            .lte('visit_date', endDate);
-        }
-        return q;
-      })()
+      fetchVisitsPaginated()
     ]);
 
-    if (visitsRes.data) setVisits(visitsRes.data);
+    if (visitsData) setVisits(visitsData);
 
     if (teamsRes.data) {
       const tMap = {};
@@ -836,7 +861,7 @@ export default function Dashboard() {
       setError(rpcError.message);
     } else {
       try { 
-        data.visits = visitsRes.data;
+        data.visits = visitsData;
         sessionStorage.setItem(cacheKey, JSON.stringify(data)); 
       } catch (e) { }
     }
@@ -1048,13 +1073,32 @@ export default function Dashboard() {
       const ratio = getTimeGrainRatio();
       const numKeys = ['working_days', 'complete_field_days', 'am_shift_days', 'pm_shift_days', 'double_visit_days', 'office_work_days', 'no_activities', 'no_events', 'am_calls', 'pm_calls', 'total_am_covered', 'total_pm_covered', 'amcenter_covered', 'hospital_covered', 'clinic_covered', 'polyclinic_covered', 'pharmacies_visited', 'pharmacies_covered', 'total_product_calls'];
 
+      // Pre-filter and pre-group rawVisits once for O(1) representative lookup
+      const visitsByCodeMap = {};
+      const visitsByNameMap = {};
+      if (hasVisitsData) {
+        const slicedVisits = filterByTimeGrain(rawVisits);
+        slicedVisits.forEach(v => {
+          if (v.employee_code) {
+            const c = String(v.employee_code).trim();
+            if (!visitsByCodeMap[c]) visitsByCodeMap[c] = [];
+            visitsByCodeMap[c].push(v);
+          }
+          if (v.user) {
+            const u = v.user.toLowerCase().trim();
+            if (!visitsByNameMap[u]) visitsByNameMap[u] = [];
+            visitsByNameMap[u].push(v);
+          }
+        });
+      }
+
       finalArr.forEach(x => {
         const normName = x.user_name?.toLowerCase().trim();
         const code = x.employee_code;
-        const userVisits = hasVisitsData ? (rawVisits || []).filter(v => {
-          const matchUser = (code && String(v.employee_code).trim() === String(code).trim()) || (normName && v.user?.toLowerCase().trim() === normName);
-          return matchUser && filterByTimeGrain([v]).length > 0;
-        }) : [];
+        const codeKey = code ? String(code).trim() : null;
+        const userVisitsByCode = codeKey ? visitsByCodeMap[codeKey] : null;
+        const userVisitsByName = normName ? visitsByNameMap[normName] : null;
+        const userVisits = hasVisitsData ? (userVisitsByCode || userVisitsByName || []) : [];
 
         if (hasVisitsData) {
           // Identify activity/office work dates to exclude from working days
@@ -1208,7 +1252,38 @@ export default function Dashboard() {
   }, [summary]);
 
   const fSpecialty = useMemo(() => {
-    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(specialty))));
+    let sourceData = specialty;
+    if (timeGrain !== 'all' && rawVisits?.length > 0) {
+      const filteredV = filterByTimeGrain(rawVisits);
+      const groups = {};
+      filteredV.forEach(v => {
+        if (!v.shift || (v.shift !== 'AM' && v.shift !== 'PM')) return;
+        const uName = v.user || '';
+        const spec = v.specialty || 'Unknown';
+        const cls = v.classification || 'Unknown';
+        const key = `${uName}||${spec}||${cls}||${v.shift}`;
+        if (!groups[key]) {
+          groups[key] = {
+            user_name: uName,
+            employee_code: v.employee_code,
+            specialty: spec,
+            classification: cls,
+            shift: v.shift,
+            team: v.team || '',
+            call_count: 0,
+            _docs: new Set()
+          };
+        }
+        groups[key].call_count += 1;
+        if (v.doctor_key || v.doctor_name) groups[key]._docs.add(v.doctor_key || v.doctor_name);
+      });
+      sourceData = Object.values(groups).map(g => ({
+        ...g,
+        unique_doctors: g._docs.size
+      }));
+    }
+
+    let r = byManagerTerritory(byLineManager(byTeam(sourceData)));
     if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
     if (userFilter !== 'all') {
       const targetNames = new Set([userFilter]);
@@ -1231,10 +1306,45 @@ export default function Dashboard() {
     }
     
     return r;
-  }, [specialty, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames]);
+  }, [specialty, rawVisits, timeGrain, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames]);
 
   const fProducts = useMemo(() => {
-    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(products))));
+    let sourceData = products;
+    if (timeGrain !== 'all' && rawVisits?.length > 0) {
+      const filteredV = filterByTimeGrain(rawVisits);
+      const groups = {};
+      filteredV.forEach(v => {
+        if (!v.shift || (v.shift !== 'AM' && v.shift !== 'PM') || !v.products) return;
+        const uName = v.user || '';
+        const spec = v.specialty || 'Unknown';
+        const prods = String(v.products).split(',');
+        prods.forEach(pRaw => {
+          const prod = pRaw.trim();
+          if (!prod) return;
+          const key = `${uName}||${prod}||${v.shift}||${spec}`;
+          if (!groups[key]) {
+            groups[key] = {
+              user_name: uName,
+              employee_code: v.employee_code,
+              product: prod,
+              shift: v.shift,
+              specialty: spec,
+              team: v.team || '',
+              call_count: 0,
+              _docs: new Set()
+            };
+          }
+          groups[key].call_count += 1;
+          if (v.doctor_key || v.doctor_name) groups[key]._docs.add(v.doctor_key || v.doctor_name);
+        });
+      });
+      sourceData = Object.values(groups).map(g => ({
+        ...g,
+        unique_doctors: g._docs.size
+      }));
+    }
+
+    let r = byManagerTerritory(byLineManager(byTeam(sourceData)));
     if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
     if (userFilter !== 'all') {
       const targetNames = new Set([userFilter]);
@@ -1257,7 +1367,7 @@ export default function Dashboard() {
     }
 
     return r;
-  }, [products, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames]);
+  }, [products, rawVisits, timeGrain, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames]);
 
   const visibleNames = useMemo(() => {
     if (!hierarchy?.length || !visibleCodes?.length) return null;
@@ -1297,24 +1407,28 @@ export default function Dashboard() {
     return r;
   }, [coaching, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, visibleNames, profile, hierarchy]);
 
-  // ── Timing data: last visit time per rep per day ──────────────────────
+  // ── Timing data: last visit time per rep per day (PM ONLY) ──────────────────────
   const timingData = useMemo(() => {
     if (!rawVisits?.length) return [];
     
-    // Identify dates where a user had an Activity or Office Work
-    const activityDates = new Set();
+    // Identify dates where a user had a PM Activity or PM Office Work
+    const pmActivityDates = new Set();
     rawVisits.forEach(v => {
-      const isActivity = (v.acc_type_category || '').toLowerCase().includes('activity') || 
-                         (v.acc_type_category || '').toLowerCase().includes('office') ||
-                         (v.visit_type_category || '').toLowerCase().includes('activity') ||
-                         (v.visit_type_category || '').toLowerCase().includes('office');
-      if (isActivity && v.user && v.visit_date) {
-        activityDates.add(`${v.user}|||${v.visit_date}`);
+      if (v.shift === 'PM') {
+        const cat1 = (v.acc_type_category || '').toLowerCase();
+        const cat2 = (v.visit_type_category || '').toLowerCase();
+        const raw = (v.acc_type_raw || '').toLowerCase();
+        const isActivityOrOffice = cat1.includes('activity') || cat1.includes('office') ||
+                                    cat2.includes('activity') || cat2.includes('office') ||
+                                    raw.includes('activity') || raw.includes('office');
+        if (isActivityOrOffice && v.user && v.visit_date) {
+          pmActivityDates.add(`${v.user}|||${v.visit_date}`);
+        }
       }
     });
 
-    // Include all visits, no longer filtered to PM Clinic only
-    const validVisits = rawVisits.filter(v => v.visit_date && v.visit_time);
+    // Condition: Last recorded PM visit ONLY (shift === 'PM'), ignoring AM visits
+    const validVisits = rawVisits.filter(v => v.visit_date && v.visit_time && v.shift === 'PM');
 
     // Group by user + date, find latest time
     const byUserDate = {};
@@ -1324,8 +1438,8 @@ export default function Dashboard() {
       if (!user || !date) return;
       const key = `${user}|||${date}`;
       
-      // Exclude this date entirely for this user if they had an activity that day!
-      if (activityDates.has(key)) return;
+      // Exclude this date entirely for this user if they had PM activity or PM office work that day!
+      if (pmActivityDates.has(key)) return;
 
       const time = v.visit_time || '';
       if (!byUserDate[key] || time > byUserDate[key].time) {
@@ -1394,8 +1508,9 @@ export default function Dashboard() {
     return { total, early, normal, late, uniqueDays };
   }, [fTiming]);
 
-  // Timing category filter state
+  // Timing category filter state & display limit for ultra-fast rendering
   const [timingCategoryFilter, setTimingCategoryFilter] = useState('all');
+  const [timingDisplayLimit, setTimingDisplayLimit] = useState(100);
 
   const filteredTiming = useMemo(() => {
     if (timingCategoryFilter === 'all') return fTiming;
@@ -2181,20 +2296,8 @@ export default function Dashboard() {
                   <option value="week2">{rtl ? 'الأسبوع الثاني (8–14)' : 'Week 2 (8–14)'}</option>
                   <option value="week3">{rtl ? 'الأسبوع الثالث (15–21)' : 'Week 3 (15–21)'}</option>
                   <option value="week4">{rtl ? 'الأسبوع الرابع (22–31)' : 'Week 4 (22–31)'}</option>
-                  <option value="daily">{rtl ? 'يوم محدد' : 'Specific Day'}</option>
                 </select>
               </div>
-              {timeGrain === 'daily' && (
-                <div className="ctrl-group">
-                  <span className="ctrl-lbl">{rtl ? 'التاريخ' : 'Date'}</span>
-                  <input
-                    type="date"
-                    className="ctrl-sel"
-                    value={selectedDate}
-                    onChange={e => setSelectedDate(e.target.value)}
-                  />
-                </div>
-              )}
               <div className="ctrl-group">
                 <span className="ctrl-lbl">{rtl ? 'الوردية' : 'Shift'}</span>
                 <ShiftToggle value={shift} onChange={setShift} t={t} />
@@ -2519,37 +2622,62 @@ export default function Dashboard() {
                     </div>
 
                     {/* Timing Detail Table */}
-                    <div className="pivot-wrap">
-                      <table className="pivot-tbl timing-tbl">
-                        <thead>
-                          <tr>
-                            <th className="s-col">{rtl ? 'التاريخ' : 'Date'}</th>
-                            <th>{rtl ? 'المندوب' : 'Rep'}</th>
-                            <th>{rtl ? 'الفريق' : 'Team'}</th>
-                            <th>{rtl ? 'آخر زيارة' : 'Last Visit'}</th>
-                            <th>{rtl ? 'الفئة' : 'Category'}</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredTiming.map((r, i) => (
-                            <tr key={`${r.user}-${r.date}-${i}`} className={`timing-row timing-row-${r.category}`}>
-                              <td className="s-col">{r.date}</td>
-                              <td>{r.user}</td>
-                              <td>{r.team || '—'}</td>
-                              <td className="timing-time">{r.formattedTime}</td>
-                              <td>
-                                <span className={`timing-badge timing-badge-${r.category}`}>
-                                  {r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
-                                    : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
-                                    : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
-                                    : '—'}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    {userFilter === 'all' && !selectedRep ? (
+                      <div className="timing-prompt-card">
+                        <div className="timing-prompt-icon">👤</div>
+                        <div className="timing-prompt-title">
+                          {rtl ? 'اختر مندوباً لعرض سجل الزيارات الأخيرة' : 'Select an Employee to View Last Visit Log'}
+                        </div>
+                        <div className="timing-prompt-desc">
+                          {rtl ? 'تم عرض إحصائيات ونسب الفئات أعلاه. يرجى اختيار مندوب محدد من القائمة أو الشريط الجانبي لعرض سجل زياراته اليومي.'
+                               : 'High-level category insights are summarized above. Select a specific employee from the REP dropdown or sidebar to inspect their exact daily last visit records.'}
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="pivot-wrap">
+                          <table className="pivot-tbl timing-tbl">
+                            <thead>
+                              <tr>
+                                <th className="s-col">{rtl ? 'التاريخ' : 'Date'}</th>
+                                <th>{rtl ? 'المندوب' : 'Rep'}</th>
+                                <th>{rtl ? 'الفريق' : 'Team'}</th>
+                                <th>{rtl ? 'آخر زيارة' : 'Last Visit'}</th>
+                                <th>{rtl ? 'الفئة' : 'Category'}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredTiming.slice(0, timingDisplayLimit).map((r, i) => (
+                                <tr key={`${r.user}-${r.date}-${i}`} className={`timing-row timing-row-${r.category}`}>
+                                  <td className="s-col">{r.date}</td>
+                                  <td>{r.user}</td>
+                                  <td>{r.team || '—'}</td>
+                                  <td className="timing-time">{r.formattedTime}</td>
+                                  <td>
+                                    <span className={`timing-badge timing-badge-${r.category}`}>
+                                      {r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
+                                        : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
+                                        : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
+                                        : '—'}
+                                    </span>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {filteredTiming.length > timingDisplayLimit && (
+                          <div className="timing-load-more">
+                            <button className="timing-btn-more" onClick={() => setTimingDisplayLimit(prev => prev + 200)}>
+                              {rtl ? `عرض المزيد (عرض ${timingDisplayLimit} من إجمالي ${filteredTiming.length})` : `Show More (Showing ${timingDisplayLimit} of ${filteredTiming.length} records)`}
+                            </button>
+                            <button className="timing-btn-all" onClick={() => setTimingDisplayLimit(filteredTiming.length)}>
+                              {rtl ? 'عرض الكل' : 'Show All'}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </>
                 )
               )}

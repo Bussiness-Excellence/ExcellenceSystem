@@ -748,3 +748,53 @@ html.dark .ucard.team-brief-card .kpi-lbl {
 html.dark .ucard.team-brief-card .kpi-v {
   color: #ffffff !important;
 }
+
+/* Timing Prompt Card & Load More */
+.timing-prompt-card {
+  background: var(--surf);
+  border: 1px solid var(--bdr);
+  border-radius: 12px;
+  padding: 36px 24px;
+  text-align: center;
+  box-shadow: var(--sh);
+  margin-top: 12px;
+}
+.timing-prompt-icon {
+  font-size: 32px;
+  margin-bottom: 10px;
+}
+.timing-prompt-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--navy);
+  margin-bottom: 6px;
+}
+.timing-prompt-desc {
+  font-size: 13px;
+  color: var(--mute);
+  max-width: 480px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+.timing-load-more {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+.timing-btn-more, .timing-btn-all {
+  padding: 8px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--bdr2);
+  background: var(--surf2);
+  color: var(--txt);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.timing-btn-more:hover, .timing-btn-all:hover {
+  border-color: var(--gold);
+  background: var(--surf);
+  transform: translateY(-1px);
+}
