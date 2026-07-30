@@ -577,27 +577,6 @@ export default function Dashboard() {
   const [specPivotMode, setSpecPivotMode] = useState('class'); // 'class' | 'user'
   const [prodPivotMode, setProdPivotMode] = useState('spec');  // 'spec' | 'user'
 
-  // Auto-default selectedDate when switching to 'daily' mode if unselected
-  useEffect(() => {
-    if (timeGrain === 'daily' && !selectedDate) {
-      if (rawVisits && rawVisits.length > 0) {
-        const sortedDates = rawVisits.map(v => v.visit_date).filter(Boolean).sort();
-        if (sortedDates.length > 0) {
-          setSelectedDate(sortedDates[sortedDates.length - 1]);
-          return;
-        }
-      }
-      if (period) {
-        const pDate = new Date(`1 ${period}`);
-        if (!isNaN(pDate.getTime())) {
-          const y = pDate.getFullYear();
-          const m = String(pDate.getMonth() + 1).padStart(2, '0');
-          setSelectedDate(`${y}-${m}-15`);
-        }
-      }
-    }
-  }, [timeGrain, selectedDate, rawVisits, period]);
-
   useEffect(() => {
     async function loadPeriods() {
       try {
@@ -689,6 +668,27 @@ export default function Dashboard() {
   const [teamsMap, setTeamsMap] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // Auto-default selectedDate when switching to 'daily' mode if unselected
+  useEffect(() => {
+    if (timeGrain === 'daily' && !selectedDate) {
+      if (rawVisits && rawVisits.length > 0) {
+        const sortedDates = rawVisits.map(v => v.visit_date).filter(Boolean).sort();
+        if (sortedDates.length > 0) {
+          setSelectedDate(sortedDates[sortedDates.length - 1]);
+          return;
+        }
+      }
+      if (period) {
+        const pDate = new Date(`1 ${period}`);
+        if (!isNaN(pDate.getTime())) {
+          const y = pDate.getFullYear();
+          const m = String(pDate.getMonth() + 1).padStart(2, '0');
+          setSelectedDate(`${y}-${m}-15`);
+        }
+      }
+    }
+  }, [timeGrain, selectedDate, rawVisits, period]);
 
   // Sidebar states
   const [selectedRep, setSelectedRep] = useState(null);
