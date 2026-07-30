@@ -757,6 +757,11 @@ export default function Dashboard() {
   const periodLabel = period;
   // Stable ref tracking what data has been fetched — survives re-renders without causing them
   const fetchedKeyRef = React.useRef(null);
+  // Key currently being fetched. fetchedKeyRef is only set AFTER a load
+  // finishes, so it cannot stop a second load that starts while the first
+  // is still running -- which is how the dashboard ended up issuing two
+  // full sets of paginated requests (102 instead of 51) on every open.
+  const inFlightKeyRef = React.useRef(null);
   const codesKey = visibleCodes ? [...visibleCodes].sort().join(',') : '';
   const currentKey = `${periodLabel}|${codesKey}|${isMgr}`;
 
@@ -770,6 +775,9 @@ export default function Dashboard() {
 
     // Skip if already fetched this key (tab switch won't retrigger)
     if (!force && fetchedKeyRef.current === currentKey) return;
+    // Already fetching this exact key -- do not start a second run.
+    if (inFlightKeyRef.current === currentKey) return;
+    inFlightKeyRef.current = currentKey;
 
     const SPECIAL_MANAGERS = [
       'ahmad morsy', 'ahmed elasyed', 'ahmed tarek mohamed', 'akram ahmed elhossary',
@@ -799,6 +807,7 @@ export default function Dashboard() {
           setCoaching(overrideSpecialManagers(parsed.coaching));
           setVisits(parsed.visits);
           fetchedKeyRef.current = currentKey;
+          inFlightKeyRef.current = null;
           setLoading(false);
           return;
         }
@@ -958,6 +967,7 @@ export default function Dashboard() {
       console.error('Dashboard load failed:', e);
       setError(e?.message || 'Failed to load dashboard data.');
     } finally {
+      inFlightKeyRef.current = null;
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
