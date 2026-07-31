@@ -11,6 +11,8 @@ const T = {
     lastMonth: 'Prev. Month Data', recent: 'Recent Month Data',
     allTeams: 'All teams', allUsers: 'All reps', search: 'Search name or territory…',
     export: 'Export', loading: 'Loading…', noData: 'No data for this period.',
+    sliceUnavailable: 'Visit-level data is not loaded for this period, so date-range slicing is unavailable. Showing Full Month instead.',
+    sliceNoDates: 'This view has no per-visit dates available, so it cannot be filtered by date range.',
     shiftAll: 'Both', shiftAM: 'AM', shiftPM: 'PM',
     people: n => `${n} rep${n !== 1 ? 's' : ''}`,
     tabs: { summary: 'Summary', specialty: 'Specialty', products: 'Products', coaching: 'Coaching/DV', timing: 'Last Visit Data' },
@@ -47,6 +49,8 @@ const T = {
     lastMonth: 'الشهر الماضي', recent: 'الأحدث  1–15',
     allTeams: 'كل الفرق', allUsers: 'كل المندوبين', search: 'بحث باسم أو منطقة…',
     export: 'تصدير', loading: 'جارٍ التحميل…', noData: 'لا توجد بيانات.',
+    sliceUnavailable: 'بيانات الزيارات غير محمّلة لهذه الفترة، لذا لا يمكن التصفية حسب النطاق الزمني. يتم عرض الشهر بالكامل.',
+    sliceNoDates: 'لا تتوفر تواريخ زيارات لهذا العرض، لذا لا يمكن تصفيته حسب النطاق الزمني.',
     shiftAll: 'الكل', shiftAM: 'AM', shiftPM: 'PM',
     people: n => `${n} مندوب`,
     tabs: { summary: 'الملخص', specialty: 'التخصص', products: 'المنتجات', coaching: 'التوجيه/مزدوجة', timing: 'بيانات الزيارة الأخيرة' },
@@ -608,56 +612,80 @@ export default function Dashboard() {
     loadPeriods();
   }, []);
 
-  const getTimeGrainRatio = useCallback(() => {
-    if (timeGrain === 'all') return 1.0;
-    if (timeGrain === 'biweekly1' || timeGrain === 'biweekly2') return 0.50;
-    if (timeGrain === 'week1' || timeGrain === 'week2' || timeGrain === 'week3') return 7 / 30;
-    if (timeGrain === 'week4') return 9 / 30;
-    if (timeGrain === 'daily') return 1 / 30;
-    return 1.0;
-  }, [timeGrain]);
+  // Day-of-month ranges for each slice. Single source of truth — the server-side
+  // range query and the client-side filter both read from here so they cannot drift.
+  // (Previously there was also a getTimeGrainRatio() that scaled month totals by a
+  //  hardcoded fraction. It estimated rather than filtered, so it has been removed.)
+  const GRAIN_RANGES = React.useMemo(() => ({
+    biweekly1: [1, 15],
+    biweekly2: [16, 31],
+    week1: [1, 7],
+    week2: [8, 14],
+    week3: [15, 21],
+    week4: [22, 31],
+  }), []);
 
+  // Returns a strict YYYY-MM-DD string, or '' if the input cannot be understood.
+  // Never returns a half-parsed value — callers rely on '' meaning "unusable".
   const normalizeDateStr = useCallback((dStr) => {
     if (!dStr) return '';
-    const s = String(dStr).trim();
-    let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
-    if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
-    m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
-    if (m) {
-      const p1 = parseInt(m[1], 10);
-      const p2 = parseInt(m[2], 10);
-      if (p1 > 12) return `${m[3]}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
-      return `${m[3]}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+    // Date objects (e.g. if a driver ever hands back a real timestamp)
+    if (dStr instanceof Date) {
+      if (isNaN(dStr.getTime())) return '';
+      const p = n => String(n).padStart(2, '0');
+      return `${dStr.getFullYear()}-${p(dStr.getMonth() + 1)}-${p(dStr.getDate())}`;
     }
-    return s;
+    const s = String(dStr).trim();
+    if (!s) return '';
+
+    const valid = (y, mo, d) =>
+      mo >= 1 && mo <= 12 && d >= 1 && d <= new Date(y, mo, 0).getDate();
+    const iso = (y, mo, d) =>
+      `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+    // YYYY-MM-DD — unambiguous, this is what the ingest pipeline produces.
+    let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)/);
+    if (m) {
+      const [y, mo, d] = [+m[1], +m[2], +m[3]];
+      return valid(y, mo, d) ? iso(y, mo, d) : '';
+    }
+
+    // DD-MM-YYYY / MM-DD-YYYY. Genuinely ambiguous for days 1-12, so only accept
+    // it when one ordering is impossible. A silent wrong guess here used to move
+    // rows into the wrong week without any visible symptom.
+    m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?!\d)/);
+    if (m) {
+      const [p1, p2, y] = [+m[1], +m[2], +m[3]];
+      const dmy = valid(y, p2, p1);   // p1 = day
+      const mdy = valid(y, p1, p2);   // p1 = month
+      if (dmy && !mdy) return iso(y, p2, p1);
+      if (mdy && !dmy) return iso(y, p1, p2);
+      return '';                      // ambiguous or invalid — refuse to guess
+    }
+
+    return '';
   }, []);
 
+  // Fails CLOSED: a row that carries no usable date is dropped, not kept.
+  // The old version returned true for undated rows, so aggregate tables with no
+  // date column (specialty, products) passed through untouched and every slice
+  // silently showed full-month totals.
   const filterByTimeGrain = useCallback((rows) => {
     if (!rows || !rows.length || timeGrain === 'all') return rows;
+    const range = GRAIN_RANGES[timeGrain];
+    const normSelected = timeGrain === 'daily' ? normalizeDateStr(selectedDate) : '';
+    if (timeGrain === 'daily' && !normSelected) return [];
+    if (timeGrain !== 'daily' && !range) return rows;
+
     return rows.filter(r => {
-      const rawDate = r.visit_date || r.coaching_date || r.date;
-      if (!rawDate) return true;
-      const isoDate = normalizeDateStr(rawDate);
-      if (!isoDate) return true;
-
-      const parts = isoDate.split('-');
-      if (parts.length < 3) return true;
-      const day = parseInt(parts[2], 10);
-
-      if (timeGrain === 'daily') {
-        if (!selectedDate) return true;
-        const normSelected = normalizeDateStr(selectedDate);
-        return isoDate === normSelected;
-      }
-      if (timeGrain === 'biweekly1') return day >= 1 && day <= 15;
-      if (timeGrain === 'biweekly2') return day >= 16 && day <= 31;
-      if (timeGrain === 'week1') return day >= 1 && day <= 7;
-      if (timeGrain === 'week2') return day >= 8 && day <= 14;
-      if (timeGrain === 'week3') return day >= 15 && day <= 21;
-      if (timeGrain === 'week4') return day >= 22 && day <= 31;
-      return true;
+      const isoDate = normalizeDateStr(r.visit_date || r.coaching_date || r.date);
+      if (!isoDate) return false;
+      if (timeGrain === 'daily') return isoDate === normSelected;
+      const day = parseInt(isoDate.slice(8, 10), 10);
+      return day >= range[0] && day <= range[1];
     });
-  }, [timeGrain, selectedDate, normalizeDateStr]);
+  }, [timeGrain, selectedDate, normalizeDateStr, GRAIN_RANGES]);
+
   const [userFilter, setUser] = useState('all');
   const [tab, setTab] = useState('summary');
   const [rawSummary, setSummary] = useState([]);
@@ -668,6 +696,13 @@ export default function Dashboard() {
   const [teamsMap, setTeamsMap] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // True when the user asked for a sub-month slice but we have no dated rows to
+  // honour it with. Surfaced in the UI instead of being papered over with an estimate.
+  const sliceUnavailable = React.useMemo(
+    () => timeGrain !== 'all' && !(rawVisits || []).length,
+    [timeGrain, rawVisits]
+  );
 
   // Auto-default selectedDate when switching to 'daily' mode if unselected
   useEffect(() => {
@@ -720,45 +755,45 @@ export default function Dashboard() {
     return map;
   }, [hierarchy]);
 
-    const userTeamMap = useMemo(() => {
-      const map = {};
-      
-      const addTeam = (mgrName, teamStr) => {
-        if (!mgrName || !teamStr || teamStr === 'Unknown') return;
-        const norm = mgrName.toLowerCase().trim();
-        if (!map[norm]) map[norm] = new Set();
-        teamStr.split(/;\s*/).filter(Boolean).forEach(t => map[norm].add(t));
-      };
+  const userTeamMap = useMemo(() => {
+    const map = {};
 
-      // 1. Gather from rawSummary
-      rawSummary.forEach(r => {
-        if (r.user_name && r.team) addTeam(r.user_name, r.team);
-      });
+    const addTeam = (mgrName, teamStr) => {
+      if (!mgrName || !teamStr || teamStr === 'Unknown') return;
+      const norm = mgrName.toLowerCase().trim();
+      if (!map[norm]) map[norm] = new Set();
+      teamStr.split(/;\s*/).filter(Boolean).forEach(t => map[norm].add(t));
+    };
 
-      // 2. Gather from complete hierarchy using teamsMap
-      (hierarchy || []).forEach(h => {
-        const teamName = teamsMap[h.team_id];
-        if (!teamName) return;
-        
-        if (h.employee_name) addTeam(h.employee_name, teamName);
-        if (h.supervisor_name) addTeam(h.supervisor_name, teamName);
-        if (h.area_manager_name) addTeam(h.area_manager_name, teamName);
-        if (h.blm_name && !h.blm_name.toLowerCase().includes('directory') && !h.blm_name.toLowerCase().includes('team')) {
-          addTeam(h.blm_name, teamName);
-        }
-      });
+    // 1. Gather from rawSummary
+    rawSummary.forEach(r => {
+      if (r.user_name && r.team) addTeam(r.user_name, r.team);
+    });
 
-      const finalMap = {};
-      Object.keys(map).forEach(k => {
-        finalMap[k] = Array.from(map[k]).sort().join('; ');
-      });
-      return finalMap;
-    }, [rawSummary, hierarchy, teamsMap]);
+    // 2. Gather from complete hierarchy using teamsMap
+    (hierarchy || []).forEach(h => {
+      const teamName = teamsMap[h.team_id];
+      if (!teamName) return;
 
-    const summary = useMemo(() => rawSummary.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSummary, userTeamMap]);
-    const specialty = useMemo(() => rawSpecialty.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSpecialty, userTeamMap]);
-    const products = useMemo(() => rawProducts.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawProducts, userTeamMap]);
-    const coaching = useMemo(() => rawCoaching.map(r => ({ ...r, team: userTeamMap[r.manager_name?.toLowerCase().trim()] || r.team })), [rawCoaching, userTeamMap]);
+      if (h.employee_name) addTeam(h.employee_name, teamName);
+      if (h.supervisor_name) addTeam(h.supervisor_name, teamName);
+      if (h.area_manager_name) addTeam(h.area_manager_name, teamName);
+      if (h.blm_name && !h.blm_name.toLowerCase().includes('directory') && !h.blm_name.toLowerCase().includes('team')) {
+        addTeam(h.blm_name, teamName);
+      }
+    });
+
+    const finalMap = {};
+    Object.keys(map).forEach(k => {
+      finalMap[k] = Array.from(map[k]).sort().join('; ');
+    });
+    return finalMap;
+  }, [rawSummary, hierarchy, teamsMap]);
+
+  const summary = useMemo(() => rawSummary.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSummary, userTeamMap]);
+  const specialty = useMemo(() => rawSpecialty.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawSpecialty, userTeamMap]);
+  const products = useMemo(() => rawProducts.map(r => ({ ...r, team: userTeamMap[r.user_name?.toLowerCase().trim()] || r.team })), [rawProducts, userTeamMap]);
+  const coaching = useMemo(() => rawCoaching.map(r => ({ ...r, team: userTeamMap[r.manager_name?.toLowerCase().trim()] || r.team })), [rawCoaching, userTeamMap]);
 
 
 
@@ -855,21 +890,17 @@ export default function Dashboard() {
       const pad = (n) => String(n).padStart(2, '0');
       const dayStr = (d) => `${y}-${pad(m + 1)}-${pad(d)}`;
 
+      const grainRange = GRAIN_RANGES[timeGrain];
       if (timeGrain === 'daily' && selectedDate) {
         const norm = normalizeDateStr(selectedDate);
-        rangeStart = norm; rangeEnd = norm;
-      } else if (timeGrain === 'biweekly1') {
-        rangeStart = dayStr(1); rangeEnd = dayStr(15);
-      } else if (timeGrain === 'biweekly2') {
-        rangeStart = dayStr(16); rangeEnd = dayStr(lastDay);
-      } else if (timeGrain === 'week1') {
-        rangeStart = dayStr(1); rangeEnd = dayStr(7);
-      } else if (timeGrain === 'week2') {
-        rangeStart = dayStr(8); rangeEnd = dayStr(14);
-      } else if (timeGrain === 'week3') {
-        rangeStart = dayStr(15); rangeEnd = dayStr(21);
-      } else if (timeGrain === 'week4') {
-        rangeStart = dayStr(22); rangeEnd = dayStr(lastDay);
+        // An unparseable selected date must not silently widen to the whole month.
+        rangeStart = norm || dayStr(1);
+        rangeEnd = norm || dayStr(lastDay);
+      } else if (grainRange) {
+        // Clamp to the real length of this month so week4/biweekly2 don't ask for
+        // a 31st that doesn't exist.
+        rangeStart = dayStr(Math.min(grainRange[0], lastDay));
+        rangeEnd = dayStr(Math.min(grainRange[1], lastDay));
       } else {
         // 'all' (whole month) — still bounded, just the full month
         rangeStart = dayStr(1); rangeEnd = dayStr(lastDay);
@@ -912,9 +943,9 @@ export default function Dashboard() {
     if (rpcError) {
       setError(rpcError.message);
     } else {
-      try { 
+      try {
         data.visits = visitsRes.data;
-        sessionStorage.setItem(cacheKey, JSON.stringify(data)); 
+        sessionStorage.setItem(cacheKey, JSON.stringify(data));
       } catch (e) { }
     }
 
@@ -1122,9 +1153,6 @@ export default function Dashboard() {
 
     if (timeGrain !== 'all') {
       const hasVisitsData = (rawVisits || []).length > 0;
-      const ratio = getTimeGrainRatio();
-      const numKeys = ['working_days', 'complete_field_days', 'am_shift_days', 'pm_shift_days', 'double_visit_days', 'office_work_days', 'no_activities', 'no_events', 'am_calls', 'pm_calls', 'total_am_covered', 'total_pm_covered', 'amcenter_covered', 'hospital_covered', 'clinic_covered', 'polyclinic_covered', 'pharmacies_visited', 'pharmacies_covered', 'total_product_calls'];
-
       finalArr.forEach(x => {
         const normName = x.user_name?.toLowerCase().trim();
         const code = x.employee_code;
@@ -1136,9 +1164,9 @@ export default function Dashboard() {
         if (hasVisitsData) {
           // Identify activity/office work dates to exclude from working days
           const isActivity = v => {
-             const cat1 = (v.acc_type_category || '').toLowerCase();
-             const cat2 = (v.visit_type_category || '').toLowerCase();
-             return cat1.includes('activity') || cat1.includes('office') || cat2.includes('activity') || cat2.includes('office');
+            const cat1 = (v.acc_type_category || '').toLowerCase();
+            const cat2 = (v.visit_type_category || '').toLowerCase();
+            return cat1.includes('activity') || cat1.includes('office') || cat2.includes('activity') || cat2.includes('office');
           };
           const activityDates = new Set(userVisits.filter(isActivity).map(v => v.visit_date).filter(Boolean));
 
@@ -1157,7 +1185,7 @@ export default function Dashboard() {
             const amDates = new Set(allUserAmVisits.map(v => v.visit_date).filter(Boolean));
             const pmDates = new Set(allUserPmVisits.map(v => v.visit_date).filter(Boolean));
             const allDates = new Set(userVisits.map(v => v.visit_date).filter(Boolean));
-            
+
             // Managers get shift days and working days from their Coaching Days
             if (x.is_manager) {
               const mgrCoaches = filteredCoaching.filter(c => c.manager_name === x.user_name);
@@ -1174,14 +1202,14 @@ export default function Dashboard() {
                 }
               });
             }
-            
+
             // Remove activity days from ALL day calculations (per user request)
             activityDates.forEach(d => {
               allDates.delete(d);
               amDates.delete(d);
               pmDates.delete(d);
             });
-            
+
             let completeCount = 0;
             allDates.forEach(d => { if (amDates.has(d) && pmDates.has(d)) completeCount++; });
 
@@ -1212,10 +1240,10 @@ export default function Dashboard() {
             const amAccountIds = amAccountVisits.map(v => v.acc_id || v.acc_name).filter(Boolean);
             x.am_accounts_unique = new Set(amAccountIds).size;
             x.am_accounts_revisits = Math.max(0, amAccountIds.length - new Set(amAccountIds).size);
-            x.pharmacies_visited = userVisits.filter(v => 
-              (v.acc_type_category||'').toLowerCase().includes('pharmacy') || 
-              (v.acc_type_raw||'').toLowerCase().includes('pharmacy') || 
-              (v.acc_name||'').toLowerCase().includes('pharmacy')
+            x.pharmacies_visited = userVisits.filter(v =>
+              (v.acc_type_category || '').toLowerCase().includes('pharmacy') ||
+              (v.acc_type_raw || '').toLowerCase().includes('pharmacy') ||
+              (v.acc_name || '').toLowerCase().includes('pharmacy')
             ).length;
             x.amcenter_covered = new Set(amVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('am center')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
             x.hospital_covered = new Set(amVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('hospital')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
@@ -1263,12 +1291,13 @@ export default function Dashboard() {
             x.distinct_products = 0;
           }
         } else {
-          // Fallback if visits table isn't populated yet in database
-          numKeys.forEach(sk => {
-            if (x[sk]) x[sk] = Math.max(1, Math.round(x[sk] * ratio));
-          });
-          x.am_call_rate = x.am_shift_days ? Math.round((x.am_calls / x.am_shift_days) * 10) / 10 : 0;
-          x.pm_call_rate = x.pm_shift_days ? Math.round((x.pm_calls / x.pm_shift_days) * 10) / 10 : 0;
+          // The visits table isn't populated for this period, so there is nothing to
+          // slice by date. The old code multiplied month totals by a hardcoded
+          // fraction (e.g. 7/30) and floored each value at 1, which produced
+          // confident-looking numbers that were pure estimates. Leave the month
+          // figures untouched and flag the row; the UI shows a banner saying the
+          // slice could not be applied.
+          x._sliceUnavailable = true;
         }
       });
     }
@@ -1316,7 +1345,11 @@ export default function Dashboard() {
       return r;
     }
 
-    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(specialty))));
+    // The specialty aggregate carries no date column, so it cannot honour a
+    // sub-month slice. Returning it unfiltered would show full-month totals under
+    // a "Week 2" label, which is what made the slicer look broken.
+    if (timeGrain !== 'all') return [];
+    let r = byManagerTerritory(byLineManager(byTeam(specialty)));
     if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
     if (userFilter !== 'all') {
       const targetNames = new Set([userFilter]);
@@ -1336,7 +1369,7 @@ export default function Dashboard() {
       r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
     }
     return r;
-  }, [rawVisits, specialty, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
+  }, [rawVisits, specialty, filterByTimeGrain, timeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
 
   const fProducts = useMemo(() => {
     if (rawVisits && rawVisits.length > 0 && rawVisits.some(v => v.products)) {
@@ -1372,7 +1405,9 @@ export default function Dashboard() {
       return r;
     }
 
-    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(products))));
+    // Same as specialty: the product aggregate has no date column.
+    if (timeGrain !== 'all') return [];
+    let r = byManagerTerritory(byLineManager(byTeam(products)));
     if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
     if (userFilter !== 'all') {
       const targetNames = new Set([userFilter]);
@@ -1392,7 +1427,7 @@ export default function Dashboard() {
       r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
     }
     return r;
-  }, [rawVisits, products, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
+  }, [rawVisits, products, filterByTimeGrain, timeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
 
   const visibleNames = useMemo(() => {
     if (!hierarchy?.length || !visibleCodes?.length) return null;
@@ -1435,14 +1470,14 @@ export default function Dashboard() {
   // ── Timing data: last visit time per rep per day ──────────────────────
   const timingData = useMemo(() => {
     if (!rawVisits?.length) return [];
-    
+
     // Identify dates where a user had an Activity or Office Work
     const activityDates = new Set();
     rawVisits.forEach(v => {
-      const isActivity = (v.acc_type_category || '').toLowerCase().includes('activity') || 
-                         (v.acc_type_category || '').toLowerCase().includes('office') ||
-                         (v.visit_type_category || '').toLowerCase().includes('activity') ||
-                         (v.visit_type_category || '').toLowerCase().includes('office');
+      const isActivity = (v.acc_type_category || '').toLowerCase().includes('activity') ||
+        (v.acc_type_category || '').toLowerCase().includes('office') ||
+        (v.visit_type_category || '').toLowerCase().includes('activity') ||
+        (v.visit_type_category || '').toLowerCase().includes('office');
       if (isActivity && v.user && v.visit_date) {
         activityDates.add(`${v.user}|||${v.visit_date}`);
       }
@@ -1458,7 +1493,7 @@ export default function Dashboard() {
       const date = v.visit_date || '';
       if (!user || !date) return;
       const key = `${user}|||${date}`;
-      
+
       // Exclude this date entirely for this user if they had an activity that day!
       if (activityDates.has(key)) return;
 
@@ -1742,8 +1777,8 @@ export default function Dashboard() {
           r.formattedTime || '—',
           r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
             : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
-            : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
-            : '—'
+              : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
+                : '—'
         ]);
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sh), 'Last Visit Data');
@@ -2251,7 +2286,7 @@ export default function Dashboard() {
                   onSelect={(label) => {
                     const cat = label === (t.kpi.timing_early || 'Before 3 PM') ? 'early'
                       : label === (t.kpi.timing_normal || '3 PM – 6 PM') ? 'normal'
-                      : label === (t.kpi.timing_late || 'After 6 PM') ? 'late' : 'all';
+                        : label === (t.kpi.timing_late || 'After 6 PM') ? 'late' : 'all';
                     setTimingCategoryFilter(prev => prev === cat ? 'all' : cat);
                   }}
                 />
@@ -2430,6 +2465,13 @@ export default function Dashboard() {
           ) : (
             <div className="dash-body">
 
+              {sliceUnavailable && (
+                <div className="dash-slice-warning" role="status">{t.sliceUnavailable}</div>
+              )}
+              {timeGrain !== 'all' && (tab === 'specialty' || tab === 'products') && !(rawVisits || []).some(v => tab === 'specialty' ? v.specialty : v.products) && (
+                <div className="dash-slice-warning" role="status">{t.sliceNoDates}</div>
+              )}
+
               {/* SUMMARY TAB */}
               {tab === 'summary' && (
                 fSummary.length === 0 ? <div className="dash-empty">{t.noData}</div> : (
@@ -2460,13 +2502,13 @@ export default function Dashboard() {
                           const roleLower = String(rawRole).toLowerCase();
                           const roleClass = roleLower.includes('area') ? 'hdr-role-am'
                             : (roleLower.includes('supervisor') || roleLower.includes('sup')) ? 'hdr-role-sup'
-                            : roleLower.includes('blm') ? 'hdr-role-blm'
-                            : 'hdr-role-mr';
+                              : roleLower.includes('blm') ? 'hdr-role-blm'
+                                : 'hdr-role-mr';
 
                           const roleLabel = roleLower.includes('area') ? (rtl ? 'مدير منطقة' : 'Area Manager')
                             : (roleLower.includes('supervisor') || roleLower.includes('sup')) ? (rtl ? 'مشرف' : 'Supervisor')
-                            : roleLower.includes('blm') ? (rtl ? 'مدير خط' : 'BLM')
-                            : (rtl ? 'مندوب' : 'MR');
+                              : roleLower.includes('blm') ? (rtl ? 'مدير خط' : 'BLM')
+                                : (rtl ? 'مندوب' : 'MR');
 
                           return (
                             <div key={r.id || i} className={`ucard ${roleClass}${r.is_manager ? ' mgr' : ''}${selectedRep === r.user_name ? ' ucard-selected' : ''}`}
@@ -2519,12 +2561,12 @@ export default function Dashboard() {
                                   </div>
                                 );
                               })}
-                            {r.product_calls_detail && shift !== 'AM' && (
-                              <div className="kpi-sec">
-                                <div className="kpi-sec-hd">{rtl ? 'تفاصيل المنتج' : 'Product Detail'}</div>
-                                <div className="prod-det">{r.product_calls_detail}</div>
-                              </div>
-                            )}
+                              {r.product_calls_detail && shift !== 'AM' && (
+                                <div className="kpi-sec">
+                                  <div className="kpi-sec-hd">{rtl ? 'تفاصيل المنتج' : 'Product Detail'}</div>
+                                  <div className="prod-det">{r.product_calls_detail}</div>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -2727,8 +2769,8 @@ export default function Dashboard() {
                                 <span className={`timing-badge timing-badge-${r.category}`}>
                                   {r.category === 'early' ? (t.kpi.timing_early || '< 3 PM')
                                     : r.category === 'normal' ? (t.kpi.timing_normal || '3–6 PM')
-                                    : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
-                                    : '—'}
+                                      : r.category === 'late' ? (t.kpi.timing_late || '> 6 PM')
+                                        : '—'}
                                 </span>
                               </td>
                             </tr>
