@@ -144,8 +144,9 @@ function formatDateDisplay(val) {
     const p1 = parseInt(mUs[1], 10);
     const p2 = parseInt(mUs[2], 10);
     const yr = parseInt(mUs[3], 10);
-    const mo = (p1 > 12 ? p2 : p1) - 1;
-    const da = p1 > 12 ? p1 : p2;
+    const isMMDDYYYY = p1 <= 12 && p2 > 12;
+    const mo = (isMMDDYYYY ? p1 : p2) - 1;
+    const da = isMMDDYYYY ? p2 : p1;
     const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     if (mo >= 0 && mo < 12) return `${shortMonths[mo]} ${da}, ${yr}`;
   }
@@ -445,7 +446,7 @@ function ShiftToggle({ value, onChange, t }) {
 }
 
 // ── PivotTable ───────────────────────────────────────────────────────────────
-function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, shiftFilter, userFilter, searchFilter, lang, hideAvg, rowTitle, colTitle }) {
+function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, secondValueKey, shiftFilter, userFilter, searchFilter, lang, hideAvg, rowTitle, colTitle }) {
   const filtered = useMemo(() => rows.filter(r => {
     if (shiftFilter !== 'all' && r.shift !== shiftFilter) return false;
     if (userFilter && userFilter !== 'all' && r.user_name !== userFilter) return false;
@@ -463,18 +464,24 @@ function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, shiftFilter,
       const rVal = r[rowKey] || 'Other';
       const cVal = r[colKey] || 'Unassigned';
       if (!c[rVal]) c[rVal] = {};
-      c[rVal][cVal] = (c[rVal][cVal] || 0) + (r[valueKey] || 0);
+      if (!c[rVal][cVal]) c[rVal][cVal] = { v1: 0, v2: 0 };
+      c[rVal][cVal].v1 += (r[valueKey] || 0);
+      if (secondValueKey) c[rVal][cVal].v2 += (r[secondValueKey] || 0);
     });
     return c;
-  }, [filtered, rowKey, colKey, valueKey]);
+  }, [filtered, rowKey, colKey, valueKey, secondValueKey]);
 
   const colTotals = useMemo(() => {
     const ct = {};
     cols.forEach(col => {
-      ct[col] = filtered.filter(r => (r[colKey] || 'Unassigned') === col).reduce((s, r) => s + (r[valueKey] || 0), 0);
+      const colRows = filtered.filter(r => (r[colKey] || 'Unassigned') === col);
+      ct[col] = {
+        v1: colRows.reduce((s, r) => s + (r[valueKey] || 0), 0),
+        v2: secondValueKey ? colRows.reduce((s, r) => s + (r[secondValueKey] || 0), 0) : 0
+      };
     });
     return ct;
-  }, [cols, filtered, colKey, valueKey]);
+  }, [cols, filtered, colKey, valueKey, secondValueKey]);
 
   // Synced top scrollbar
   const topScrollRef = useRef(null);
@@ -528,14 +535,26 @@ function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, shiftFilter,
               <tr className="avg-row">
                 <th className="s-col avg-lbl">⌀ Avg</th>
                 {cols.map(c => {
-                  const cTotal = colTotals[c] || 0;
-                  const cRows = rowKeys.filter(k => cells[k]?.[c]).length;
-                  return <th key={c} className="avg-cell">{cRows > 0 ? Math.round(cTotal / cRows) : 0}</th>;
+                  const cTotal = colTotals[c]?.v1 || 0;
+                  const cRows = rowKeys.filter(k => cells[k]?.[c]?.v1).length;
+                  const avgV1 = cRows > 0 ? Math.round(cTotal / cRows) : 0;
+                  if (secondValueKey) {
+                    const cTotal2 = colTotals[c]?.v2 || 0;
+                    const avgV2 = cRows > 0 ? Math.round(cTotal2 / cRows) : 0;
+                    return <th key={c} className="avg-cell">{avgV1} / {avgV2}</th>;
+                  }
+                  return <th key={c} className="avg-cell">{avgV1}</th>;
                 })}
                 <th className="t-col avg-cell">
                   {(() => {
-                    const gt = filtered.reduce((s, r) => s + (r[valueKey] || 0), 0);
-                    return cols.length > 0 ? Math.round(gt / cols.length) : 0;
+                    const gt1 = filtered.reduce((s, r) => s + (r[valueKey] || 0), 0);
+                    const avgGt1 = cols.length > 0 ? Math.round(gt1 / cols.length) : 0;
+                    if (secondValueKey) {
+                      const gt2 = filtered.reduce((s, r) => s + (r[secondValueKey] || 0), 0);
+                      const avgGt2 = cols.length > 0 ? Math.round(gt2 / cols.length) : 0;
+                      return `${avgGt1} / ${avgGt2}`;
+                    }
+                    return avgGt1;
                   })()}
                 </th>
               </tr>
@@ -543,22 +562,39 @@ function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, shiftFilter,
           </thead>
           <tbody>
             {rowKeys.map(k => {
-              const rowTotal = cols.reduce((s, c) => s + (cells[k]?.[c] || 0), 0);
+              const rowTotal1 = cols.reduce((s, c) => s + (cells[k]?.[c]?.v1 || 0), 0);
+              const rowTotal2 = secondValueKey ? cols.reduce((s, c) => s + (cells[k]?.[c]?.v2 || 0), 0) : 0;
               return (
                 <tr key={k}>
                   <td className="s-col">{k}</td>
                   {cols.map(c => {
                     const v = cells[k]?.[c];
-                    return <td key={c} className={v ? 'has-v' : 'nil'}>{v || ''}</td>;
+                    if (!v) return <td key={c} className="nil"></td>;
+                    if (secondValueKey) {
+                      return <td key={c} className={v.v1 ? 'has-v' : 'nil'}>{v.v1 ? `${v.v1} / ${v.v2}` : ''}</td>;
+                    }
+                    return <td key={c} className={v.v1 ? 'has-v' : 'nil'}>{v.v1 || ''}</td>;
                   })}
-                  <td className="t-col">{rowTotal}</td>
+                  <td className="t-col">{secondValueKey ? `${rowTotal1} / ${rowTotal2}` : rowTotal1}</td>
                 </tr>
               );
             })}
             <tr className="tot-row">
               <td className="s-col">Σ Total</td>
-              {cols.map(c => <td key={c}>{colTotals[c] || 0}</td>)}
-              <td className="t-col">{filtered.reduce((s, r) => s + (r[valueKey] || 0), 0)}</td>
+              {cols.map(c => {
+                if (secondValueKey) return <td key={c}>{colTotals[c]?.v1 || 0} / {colTotals[c]?.v2 || 0}</td>;
+                return <td key={c}>{colTotals[c]?.v1 || 0}</td>;
+              })}
+              <td className="t-col">
+                {(() => {
+                  const gt1 = filtered.reduce((s, r) => s + (r[valueKey] || 0), 0);
+                  if (secondValueKey) {
+                    const gt2 = filtered.reduce((s, r) => s + (r[secondValueKey] || 0), 0);
+                    return `${gt1} / ${gt2}`;
+                  }
+                  return gt1;
+                })()}
+              </td>
             </tr>
           </tbody>
         </table>
@@ -570,7 +606,7 @@ function PivotTable({ rows, rowKey, colKey = 'user_name', valueKey, shiftFilter,
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const { profile, hierarchy, visibleCodes, signOut } = useAuth();
-  const [lang, setLang] = useState(profile?.preferred_lang || 'en');
+  const lang = 'en';
   const [period, setPeriod] = useState('');
   const [availablePeriods, setAvailablePeriods] = useState([]);
   const [team, setTeam] = useState('all');
@@ -660,7 +696,9 @@ export default function Dashboard() {
       const mdy = valid(y, p1, p2);   // p1 = month
       if (dmy && !mdy) return iso(y, p2, p1);
       if (mdy && !dmy) return iso(y, p1, p2);
-      return '';                      // ambiguous or invalid — refuse to guess
+      // If ambiguous (both valid), assume DD-MM-YYYY which is standard for most of the world
+      if (dmy) return iso(y, p2, p1);
+      return '';                      // invalid
     }
 
     return '';
@@ -864,11 +902,7 @@ export default function Dashboard() {
     const cached = !force && sessionStorage.getItem(cacheKey);
     if (cached) {
       try {
-        const parsed = JSON.parse(cached);
         setSummary(overrideSpecialManagers(parsed.summaries));
-        setSpecialty(overrideSpecialManagers(parsed.specialty));
-        setProducts(overrideSpecialManagers(parsed.products));
-        setCoaching(overrideSpecialManagers(parsed.coaching));
         if (parsed.visits) setVisits(parsed.visits);
         fetchedKeyRef.current = currentKey;
         setLoading(false);
@@ -907,15 +941,7 @@ export default function Dashboard() {
       }
     }
 
-    const [rpcRes, teamsRes, visitsRes] = await Promise.all([
-      supabase.rpc('get_dashboard_data', {
-        p_period: periodLabel,
-        p_codes: codes,
-        p_is_admin: isAdmin,
-        p_is_manager: isMgr,
-        p_start_date: rangeStart,
-        p_end_date: rangeEnd,
-      }),
+    const [teamsRes, visitsRes] = await Promise.all([
       supabase.from('teams').select('id, name'),
       (() => {
         let visitsQuery = supabase.from('visits')
@@ -932,27 +958,39 @@ export default function Dashboard() {
 
     if (visitsRes.data) setVisits(visitsRes.data);
 
+    let tMap = {};
     if (teamsRes.data) {
-      const tMap = {};
       teamsRes.data.forEach(t => tMap[t.id] = t.name);
       setTeamsMap(tMap);
     }
 
-    const { data, error: rpcError } = rpcRes;
-
-    if (rpcError) {
-      setError(rpcError.message);
+    if (visitsRes.error) {
+      setError(visitsRes.error.message);
     } else {
+      // Build base summary from hierarchy so we have a row for every visible user
+      const baseSummaries = (hierarchy || [])
+        .filter(h => codes.includes(h.employee_code))
+        .map(h => ({
+          user_name: h.employee_name,
+          employee_code: h.employee_code,
+          role: h.role,
+          is_manager: h.role !== 'MR',
+          team: tMap[h.team_id] || 'Unknown',
+          territory: h.division_name || '',
+          manager_name: h.supervisor_name || h.area_manager_name || h.blm_name || '',
+        }));
+      
+      const dataToCache = { summaries: baseSummaries, visits: visitsRes.data };
       try {
-        data.visits = visitsRes.data;
-        sessionStorage.setItem(cacheKey, JSON.stringify(data));
+        sessionStorage.setItem(cacheKey, JSON.stringify(dataToCache));
       } catch (e) { }
+
+      setSummary(overrideSpecialManagers(baseSummaries));
     }
 
-    setSummary(overrideSpecialManagers(data?.summaries));
-    setSpecialty(overrideSpecialManagers(data?.specialty));
-    setProducts(overrideSpecialManagers(data?.products));
-    setCoaching(overrideSpecialManagers(data?.coaching));
+    setSpecialty([]);
+    setProducts([]);
+    setCoaching([]);
     fetchedKeyRef.current = currentKey;
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1103,207 +1141,164 @@ export default function Dashboard() {
       r = r.filter(x => targetNames.has(x.user_name));
     }
     const m = new Map();
-    r.forEach(x => {
-      const k = x.user_name;
-      if (!m.has(k)) {
-        m.set(k, { ...x, _am_days_sum: x.am_shift_days || 0, _pm_days_sum: x.pm_shift_days || 0, _am_dur_sum: (x.avg_am_shift_hm || 0) * (x.am_shift_days || 0), _pm_dur_sum: (x.avg_pm_shift_hm || 0) * (x.pm_shift_days || 0) });
-      } else {
-        const existing = m.get(k);
-        const sumKeys = ['working_days', 'complete_field_days', 'am_shift_days', 'pm_shift_days', 'double_visit_days', 'office_work_days', 'no_activities', 'no_events', 'am_calls', 'pm_calls', 'total_am_covered', 'total_pm_covered', 'amcenter_covered', 'hospital_covered', 'clinic_covered', 'polyclinic_covered', 'pharmacies_visited', 'pharmacies_covered', 'total_product_calls', 'distinct_products', 'coaching_days'];
-        sumKeys.forEach(sk => existing[sk] = (existing[sk] || 0) + (x[sk] || 0));
-        if (x.territory && !existing.territory?.includes(x.territory)) {
-          existing.territory = existing.territory ? `${existing.territory}; ${x.territory}` : x.territory;
-        }
-        existing._am_days_sum += (x.am_shift_days || 0);
-        existing._pm_days_sum += (x.pm_shift_days || 0);
-        existing._am_dur_sum += (x.avg_am_shift_hm || 0) * (x.am_shift_days || 0);
-        existing._pm_dur_sum += (x.avg_pm_shift_hm || 0) * (x.pm_shift_days || 0);
-        existing.am_call_rate = existing.am_shift_days ? (existing.am_calls / existing.am_shift_days) : 0;
-        existing.pm_call_rate = existing.pm_shift_days ? (existing.pm_calls / existing.pm_shift_days) : 0;
-        existing.avg_am_shift_hm = existing._am_days_sum > 0 ? (existing._am_dur_sum / existing._am_days_sum) : 0;
-        existing.avg_pm_shift_hm = existing._pm_days_sum > 0 ? (existing._pm_dur_sum / existing._pm_days_sum) : 0;
-      }
-    });
+    r.forEach(x => { m.set(x.user_name, { ...x }); });
     const finalArr = Array.from(m.values());
 
-    // Recalculate coaching days from actual coaching data (filtered by exact time grain date if set)
-    const filteredCoaching = filterByTimeGrain(coaching || []);
-    const mgrCoachingMap = {};
-    const repCoachingMap = {};
-    filteredCoaching.forEach(c => {
-      const mgr = c.manager_name;
-      const rep = c.rep_name;
-      if (mgr) {
-        if (!mgrCoachingMap[mgr]) mgrCoachingMap[mgr] = new Set();
-        if (c.coaching_date) mgrCoachingMap[mgr].add(c.coaching_date);
-      }
-      if (rep) {
-        if (!repCoachingMap[rep]) repCoachingMap[rep] = new Set();
-        if (c.coaching_date) repCoachingMap[rep].add(c.coaching_date);
-      }
-    });
+    const formatTimeStr = (totalMins) => {
+      if (!totalMins) return '—';
+      let hrs = Math.floor(totalMins / 60);
+      let mins = Math.floor(totalMins % 60);
+      const ampm = hrs >= 12 ? 'PM' : 'AM';
+      if (hrs > 12) hrs -= 12;
+      if (hrs === 0) hrs = 12;
+      return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')} ${ampm}`;
+    };
 
-    finalArr.forEach(x => {
-      if (x.is_manager) {
-        x.coaching_days = mgrCoachingMap[x.user_name] ? mgrCoachingMap[x.user_name].size : 0;
-      } else {
-        x.coaching_days = repCoachingMap[x.user_name] ? repCoachingMap[x.user_name].size : 0;
-      }
-    });
+    if (rawVisits && rawVisits.length > 0) {
+      const processedVisits = filterByTimeGrain(rawVisits).map(v => {
+        const cat = (v.acc_type_category || '').toLowerCase();
+        let derivedShift = '';
+        if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) {
+          derivedShift = 'AM';
+        } else if (cat.includes('clinic') || cat.includes('poly')) {
+          derivedShift = 'PM';
+        } else {
+          derivedShift = v.shift;
+        }
 
-    if (timeGrain !== 'all') {
-      const hasVisitsData = (rawVisits || []).length > 0;
+        const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
+        const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
+
+        let timeStr = v.visit_time || '';
+        let visitMinutes = 0;
+        if (timeStr) {
+          if (typeof timeStr === 'number') {
+            const totalSeconds = Math.round(timeStr * 24 * 3600);
+            visitMinutes = Math.floor(totalSeconds / 60);
+          } else {
+             const parts = String(timeStr).split(':');
+             if (parts.length >= 2) {
+               visitMinutes = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+               if (String(timeStr).toLowerCase().includes('pm') && parseInt(parts[0], 10) !== 12) visitMinutes += 12 * 60;
+               else if (String(timeStr).toLowerCase().includes('am') && parseInt(parts[0], 10) === 12) visitMinutes -= 12 * 60;
+             }
+          }
+        }
+        return { ...v, derivedShift, isPharmacy, isActivity, visitMinutes };
+      });
+
+      const doubleVisitGroups = new Map();
+      processedVisits.forEach(v => {
+        if (!v.acc_name || !v.visit_date || !v.visit_time || !v.specialty || v.isPharmacy || v.isActivity) return;
+        const key = `${v.acc_name}||${v.visit_date}||${v.visit_time}||${v.specialty}`;
+        if (!doubleVisitGroups.has(key)) doubleVisitGroups.set(key, new Set());
+        doubleVisitGroups.get(key).add(v.user?.toLowerCase().trim());
+      });
+
       finalArr.forEach(x => {
         const normName = x.user_name?.toLowerCase().trim();
         const code = x.employee_code;
-        const userVisits = hasVisitsData ? (rawVisits || []).filter(v => {
-          const matchUser = (code && String(v.employee_code).trim() === String(code).trim()) || (normName && v.user?.toLowerCase().trim() === normName);
-          return matchUser && filterByTimeGrain([v]).length > 0;
-        }) : [];
+        const userVisits = processedVisits.filter(v => (code && String(v.employee_code).trim() === String(code).trim()) || (normName && v.user?.toLowerCase().trim() === normName));
 
-        if (hasVisitsData) {
-          // Identify activity/office work dates to exclude from working days
-          const isActivity = v => {
-            const cat1 = (v.acc_type_category || '').toLowerCase();
-            const cat2 = (v.visit_type_category || '').toLowerCase();
-            return cat1.includes('activity') || cat1.includes('office') || cat2.includes('activity') || cat2.includes('office');
-          };
-          const activityDates = new Set(userVisits.filter(isActivity).map(v => v.visit_date).filter(Boolean));
+        // Find days with PM Activity or PM Office Work
+        const pmActivityDays = new Set(userVisits.filter(v => v.isActivity && (v.shift === 'PM' || v.derivedShift === 'PM' || v.visitMinutes >= 12 * 60)).map(v => v.visit_date).filter(Boolean));
 
-          if (userVisits.length > 0 || x.coaching_days > 0) {
-            // Count calls only from real doctor/account visits
-            const actualVisits = userVisits.filter(v => v.doctor_name || v.acc_name);
-            const amVisits = actualVisits.filter(v => v.shift === 'AM');
-            const pmVisits = actualVisits.filter(v => v.shift === 'PM');
-            const amCalls = amVisits.length;
-            const pmCalls = pmVisits.length;
+        // Filter out visits that land on a PM activity day (except for total raw visits which counts them)
+        const validVisits = userVisits.filter(v => !pmActivityDays.has(v.visit_date));
 
-            // For DAY counting: use ALL visits (any row = person was present that day)
-            // This prevents holidays/blank rows from zeroing out a day that had real visits
-            const allUserAmVisits = userVisits.filter(v => v.shift === 'AM');
-            const allUserPmVisits = userVisits.filter(v => v.shift === 'PM');
-            const amDates = new Set(allUserAmVisits.map(v => v.visit_date).filter(Boolean));
-            const pmDates = new Set(allUserPmVisits.map(v => v.visit_date).filter(Boolean));
-            const allDates = new Set(userVisits.map(v => v.visit_date).filter(Boolean));
+        const validVisitsByDate = new Map();
+        validVisits.forEach(v => {
+           if (!v.visit_date) return;
+           if (!validVisitsByDate.has(v.visit_date)) validVisitsByDate.set(v.visit_date, []);
+           validVisitsByDate.get(v.visit_date).push(v);
+        });
 
-            // Managers get shift days and working days from their Coaching Days
-            if (x.is_manager) {
-              const mgrCoaches = filteredCoaching.filter(c => c.manager_name === x.user_name);
-              mgrCoaches.forEach(c => {
-                if (c.coaching_date) {
-                  allDates.add(c.coaching_date);
-                  // If we have am/pm breakdown in coaching
-                  if (c.am_visits > 0 || c.am_accompanied > 0) amDates.add(c.coaching_date);
-                  if (c.pm_visits > 0 || c.pm_accompanied > 0) pmDates.add(c.coaching_date);
-                  // Fallback: if no specific AM/PM is logged but it's a coaching day, assume both or at least AM
-                  if (!c.am_visits && !c.am_accompanied && !c.pm_visits && !c.pm_accompanied) {
-                    amDates.add(c.coaching_date);
-                  }
-                }
-              });
+        let fieldWorkingDaysCount = 0;
+        let totalAmFirstVisitMinutes = 0;
+        let validAmFirstVisitDays = 0;
+        let amShiftDays = 0;
+        let pmShiftDays = 0;
+        let totalAmShiftDurMinutes = 0;
+        let validAmShiftDurDays = 0;
+        let totalPmShiftDurMinutes = 0;
+        let validPmShiftDurDays = 0;
+
+        validVisitsByDate.forEach((dayVisits) => {
+          const doctorVisits = dayVisits.filter(v => !v.isPharmacy && !v.isActivity);
+          const hasAm = doctorVisits.some(v => v.derivedShift === 'AM');
+          const hasPm = doctorVisits.some(v => v.derivedShift === 'PM');
+          
+          if (hasAm || hasPm) {
+            fieldWorkingDaysCount++;
+            if (hasAm) amShiftDays++;
+            if (hasPm) pmShiftDays++;
+
+            const amDoctorVisits = doctorVisits.filter(v => v.derivedShift === 'AM' && v.visitMinutes > 0);
+            if (amDoctorVisits.length > 0) {
+              const times = amDoctorVisits.map(v => v.visitMinutes).sort((a,b)=>a-b);
+              totalAmFirstVisitMinutes += times[0];
+              validAmFirstVisitDays++;
+              if (times.length > 1) {
+                totalAmShiftDurMinutes += (times[times.length - 1] - times[0]);
+                validAmShiftDurDays++;
+              }
             }
 
-            // Remove activity days from ALL day calculations (per user request)
-            activityDates.forEach(d => {
-              allDates.delete(d);
-              amDates.delete(d);
-              pmDates.delete(d);
-            });
-
-            let completeCount = 0;
-            allDates.forEach(d => { if (amDates.has(d) && pmDates.has(d)) completeCount++; });
-
-            x.am_calls = amCalls;
-            x.pm_calls = pmCalls;
-            x.am_shift_days = amDates.size;
-            x.pm_shift_days = pmDates.size;
-            x.working_days = allDates.size;
-            x.complete_field_days = completeCount;
-            // Zero out fields that we can't accurately slice from rawVisits alone
-            x.office_work_days = 0;
-            x.no_activities = 0;
-            x.no_events = 0;
-            x.double_visit_days = 0;
-            x.avg_am_shift_hm = 0;
-            x.avg_pm_shift_hm = 0;
-            x.avg_field_overall_hm = 0;
-            x.total_visits = userVisits.length;
-            x.am_call_rate = amDates.size > 0 ? Math.round((amCalls / amDates.size) * 10) / 10 : 0;
-            x.pm_call_rate = pmDates.size > 0 ? Math.round((pmCalls / pmDates.size) * 10) / 10 : 0;
-            x.total_am_covered = new Set(amVisits.map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-            x.total_pm_covered = new Set(pmVisits.map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-            // AM account coverage: unique accounts (acc_id or acc_name) for Hospital/AM Center
-            const amAccountVisits = amVisits.filter(v => {
-              const cat = (v.acc_type_category || '').toLowerCase();
-              return cat.includes('hospital') || cat.includes('am center');
-            });
-            const amAccountIds = amAccountVisits.map(v => v.acc_id || v.acc_name).filter(Boolean);
-            x.am_accounts_unique = new Set(amAccountIds).size;
-            x.am_accounts_revisits = Math.max(0, amAccountIds.length - new Set(amAccountIds).size);
-            x.pharmacies_visited = userVisits.filter(v =>
-              (v.acc_type_category || '').toLowerCase().includes('pharmacy') ||
-              (v.acc_type_raw || '').toLowerCase().includes('pharmacy') ||
-              (v.acc_name || '').toLowerCase().includes('pharmacy')
-            ).length;
-            x.amcenter_covered = new Set(amVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('am center')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-            x.hospital_covered = new Set(amVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('hospital')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-            x.clinic_covered = new Set(pmVisits.filter(v => {
-              const cat = (v.acc_type_category || '').toLowerCase();
-              return cat.includes('clinic') && !cat.includes('poly');
-            }).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-            x.polyclinic_covered = new Set(pmVisits.filter(v => (v.acc_type_category || '').toLowerCase().includes('poly')).map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-            x.pharmacies_covered = new Set(userVisits.filter(v => {
-              const cat = (v.acc_type_category || '').toLowerCase();
-              const raw = (v.acc_type_raw || '').toLowerCase();
-              const name = (v.acc_name || '').toLowerCase();
-              return cat.includes('pharmacy') || raw.includes('pharmacy') || name.includes('pharmacy');
-            }).map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
-            x.total_product_calls = 0;
-            x.distinct_products = 0;
-          } else {
-            x.am_calls = 0;
-            x.pm_calls = 0;
-            x.am_shift_days = 0;
-            x.pm_shift_days = 0;
-            x.working_days = 0;
-            x.complete_field_days = 0;
-            x.office_work_days = 0;
-            x.no_activities = 0;
-            x.no_events = 0;
-            x.double_visit_days = 0;
-            x.avg_am_shift_hm = 0;
-            x.avg_pm_shift_hm = 0;
-            x.avg_field_overall_hm = 0;
-            x.total_visits = 0;
-            x.am_call_rate = 0;
-            x.pm_call_rate = 0;
-            x.total_am_covered = 0;
-            x.total_pm_covered = 0;
-            x.am_accounts_unique = 0;
-            x.am_accounts_revisits = 0;
-            x.pharmacies_visited = 0;
-            x.amcenter_covered = 0;
-            x.hospital_covered = 0;
-            x.clinic_covered = 0;
-            x.polyclinic_covered = 0;
-            x.pharmacies_covered = 0;
-            x.total_product_calls = 0;
-            x.distinct_products = 0;
+            const pmDoctorVisits = doctorVisits.filter(v => v.derivedShift === 'PM' && v.visitMinutes > 0);
+            if (pmDoctorVisits.length > 1) {
+              const times = pmDoctorVisits.map(v => v.visitMinutes).sort((a,b)=>a-b);
+              totalPmShiftDurMinutes += (times[times.length - 1] - times[0]);
+              validPmShiftDurDays++;
+            }
           }
-        } else {
-          // The visits table isn't populated for this period, so there is nothing to
-          // slice by date. The old code multiplied month totals by a hardcoded
-          // fraction (e.g. 7/30) and floored each value at 1, which produced
-          // confident-looking numbers that were pure estimates. Leave the month
-          // figures untouched and flag the row; the UI shows a banner saying the
-          // slice could not be applied.
-          x._sliceUnavailable = true;
-        }
+        });
+
+        const amDoctorVisits = validVisits.filter(v => v.derivedShift === 'AM' && !v.isPharmacy && !v.isActivity);
+        x.am_calls = amDoctorVisits.length;
+        x.amcenter_covered = new Set(amDoctorVisits.map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
+        x.am_accounts_unique = new Set(amDoctorVisits.map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
+
+        const pmDoctorVisits = validVisits.filter(v => v.derivedShift === 'PM' && !v.isPharmacy && !v.isActivity);
+        x.pm_calls = pmDoctorVisits.length;
+        x.clinic_covered = new Set(pmDoctorVisits.map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
+        x.polyclinic_covered = new Set(pmDoctorVisits.map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
+
+        const pharmacyVisits = validVisits.filter(v => v.isPharmacy);
+        x.pharmacies_visited = pharmacyVisits.length;
+        x.pharmacies_covered = new Set(pharmacyVisits.map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
+
+        let doubleVisitsCount = 0;
+        validVisits.forEach(v => {
+          if (!v.acc_name || !v.visit_date || !v.visit_time || !v.specialty || v.isPharmacy || v.isActivity) return;
+          const key = `${v.acc_name}||${v.visit_date}||${v.visit_time}||${v.specialty}`;
+          const usersInVisit = doubleVisitGroups.get(key);
+          if (usersInVisit && usersInVisit.size > 1 && usersInVisit.has(normName)) {
+            doubleVisitsCount++;
+          }
+        });
+        x.double_visit_days = doubleVisitsCount;
+
+        x.working_days = fieldWorkingDaysCount;
+        x.am_shift_days = amShiftDays;
+        x.pm_shift_days = pmShiftDays;
+
+        x.avg_am_start_time = validAmFirstVisitDays > 0 ? formatTimeStr(totalAmFirstVisitMinutes / validAmFirstVisitDays) : '—';
+        x.avg_am_shift_hm = validAmShiftDurDays > 0 ? (totalAmShiftDurMinutes / validAmShiftDurDays) / 60 : 0;
+        x.avg_pm_shift_hm = validPmShiftDurDays > 0 ? (totalPmShiftDurMinutes / validPmShiftDurDays) / 60 : 0;
+
+        x.total_visits = userVisits.length;
+        x.no_activities = 0;
+        x.no_events = 0;
+        x.office_work_days = pmActivityDays.size;
+        x.total_am_covered = x.amcenter_covered;
+        x.total_pm_covered = x.clinic_covered + x.polyclinic_covered;
+        x.am_call_rate = amShiftDays > 0 ? Math.round((x.am_calls / amShiftDays) * 10) / 10 : 0;
+        x.pm_call_rate = pmShiftDays > 0 ? Math.round((x.pm_calls / pmShiftDays) * 10) / 10 : 0;
       });
     }
 
     return sortSummary(finalArr);
-  }, [summary, coaching, rawVisits, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, timeGrain, filterByTimeGrain]);
+  }, [summary, rawVisits, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, filterByTimeGrain]);
 
   const managerNames = useMemo(() => {
     const s = new Set();
@@ -1322,7 +1317,22 @@ export default function Dashboard() {
         const u = v.user || v.user_name || 'Unknown';
         const spec = v.specialty;
         const cls = v.classification || 'Unclassified';
-        const shft = v.shift || 'AM';
+        
+        const cat = (v.acc_type_category || '').toLowerCase();
+        let shft = '';
+        if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) {
+          shft = 'AM';
+        } else if (cat.includes('clinic') || cat.includes('poly')) {
+          shft = 'PM';
+        } else {
+          shft = v.shift || 'AM';
+        }
+
+        const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
+        const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
+        
+        if (isPharmacy || isActivity) return;
+
         const key = `${u}||${spec}||${cls}||${shft}`;
         if (!map.has(key)) {
           map.set(key, {
@@ -1332,44 +1342,27 @@ export default function Dashboard() {
             classification: cls,
             shift: shft,
             call_count: 0,
+            _coveredSet: new Set(),
+            covered: 0,
             team: userTeamMap[u.toLowerCase().trim()] || v.team || ''
           });
         }
-        map.get(key).call_count += 1;
+        
+        const item = map.get(key);
+        item.call_count += 1;
+        if (v.doctor_key || v.doctor_name) {
+           item._coveredSet.add(v.doctor_key || v.doctor_name);
+        }
       });
-      let r = Array.from(map.values());
+      let r = Array.from(map.values()).map(x => { x.covered = x._coveredSet.size; return x; });
       r = byManagerTerritory(byLineManager(byTeam(r)));
       if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
       if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
       if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
       return r;
     }
-
-    // The specialty aggregate carries no date column, so it cannot honour a
-    // sub-month slice. Returning it unfiltered would show full-month totals under
-    // a "Week 2" label, which is what made the slicer look broken.
-    if (timeGrain !== 'all') return [];
-    let r = byManagerTerritory(byLineManager(byTeam(specialty)));
-    if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
-    if (userFilter !== 'all') {
-      const targetNames = new Set([userFilter]);
-      (hierarchy || []).forEach(h => {
-        if (h.area_manager_name === userFilter || h.supervisor_name === userFilter) {
-          if (h.employee_name) targetNames.add(h.employee_name);
-        }
-        if (h.employee_name === userFilter) {
-          if (h.supervisor_name) targetNames.add(h.supervisor_name);
-          else if (h.area_manager_name) targetNames.add(h.area_manager_name);
-          else if (h.blm_name && !h.blm_name.includes('Directory') && !h.blm_name.includes('TEAM')) targetNames.add(h.blm_name);
-        }
-      });
-      r = r.filter(x => targetNames.has(x.user_name));
-    }
-    if (userFilter === 'all') {
-      r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
-    }
-    return r;
-  }, [rawVisits, specialty, filterByTimeGrain, timeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
+    return [];
+  }, [rawVisits, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, managerNames, userTeamMap]);
 
   const fProducts = useMemo(() => {
     if (rawVisits && rawVisits.length > 0 && rawVisits.some(v => v.products)) {
@@ -1379,7 +1372,22 @@ export default function Dashboard() {
         if (!v.products) return;
         const u = v.user || v.user_name || 'Unknown';
         const spec = v.specialty || 'General';
-        const shft = v.shift || 'AM';
+        
+        const cat = (v.acc_type_category || '').toLowerCase();
+        let shft = '';
+        if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) {
+          shft = 'AM';
+        } else if (cat.includes('clinic') || cat.includes('poly')) {
+          shft = 'PM';
+        } else {
+          shft = v.shift || 'AM';
+        }
+
+        const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
+        const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
+        
+        if (isPharmacy || isActivity) return;
+
         const prods = v.products.split(',').map(p => p.trim()).filter(Boolean);
         prods.forEach(prod => {
           const key = `${u}||${spec}||${prod}||${shft}`;
@@ -1391,43 +1399,27 @@ export default function Dashboard() {
               product: prod,
               shift: shft,
               call_count: 0,
+              _coveredSet: new Set(),
+              covered: 0,
               team: userTeamMap[u.toLowerCase().trim()] || v.team || ''
             });
           }
-          map.get(key).call_count += 1;
+          const item = map.get(key);
+          item.call_count += 1;
+          if (v.doctor_key || v.doctor_name) {
+             item._coveredSet.add(v.doctor_key || v.doctor_name);
+          }
         });
       });
-      let r = Array.from(map.values());
+      let r = Array.from(map.values()).map(x => { x.covered = x._coveredSet.size; return x; });
       r = byManagerTerritory(byLineManager(byTeam(r)));
       if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
       if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
       if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
       return r;
     }
-
-    // Same as specialty: the product aggregate has no date column.
-    if (timeGrain !== 'all') return [];
-    let r = byManagerTerritory(byLineManager(byTeam(products)));
-    if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
-    if (userFilter !== 'all') {
-      const targetNames = new Set([userFilter]);
-      (hierarchy || []).forEach(h => {
-        if (h.area_manager_name === userFilter || h.supervisor_name === userFilter) {
-          if (h.employee_name) targetNames.add(h.employee_name);
-        }
-        if (h.employee_name === userFilter) {
-          if (h.supervisor_name) targetNames.add(h.supervisor_name);
-          else if (h.area_manager_name) targetNames.add(h.area_manager_name);
-          else if (h.blm_name && !h.blm_name.includes('Directory') && !h.blm_name.includes('TEAM')) targetNames.add(h.blm_name);
-        }
-      });
-      r = r.filter(x => targetNames.has(x.user_name));
-    }
-    if (userFilter === 'all') {
-      r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
-    }
-    return r;
-  }, [rawVisits, products, filterByTimeGrain, timeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, managerNames, userTeamMap]);
+    return [];
+  }, [rawVisits, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, managerNames, userTeamMap]);
 
   const visibleNames = useMemo(() => {
     if (!hierarchy?.length || !visibleCodes?.length) return null;
@@ -1443,50 +1435,73 @@ export default function Dashboard() {
   }, [hierarchy, visibleCodes, profile]);
 
   const fCoaching = useMemo(() => {
-    let r = byManagerTerritory(byLineManager(byTeam(filterByTimeGrain(coaching))));
-    if (visibleNames && profile?.role !== 'Admin') {
-      r = r.filter(x => visibleNames.has(x.manager_name) || visibleNames.has(x.rep_name));
-    }
-    if (search) r = r.filter(x => x.manager_name?.toLowerCase().includes(search.toLowerCase()) || x.rep_name?.toLowerCase().includes(search.toLowerCase()));
+    let r = fSummary.filter(x => x.is_manager && (x.role === 'Area Manager' || x.role === 'Supervisor'));
+    if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
+    
     if (userFilter !== 'all') {
-      const managerNames = new Set([userFilter]);
+      const targetNames = new Set([userFilter]);
       (hierarchy || []).forEach(h => {
         if (h.area_manager_name === userFilter || h.supervisor_name === userFilter) {
-          if (h.role === 'Area Manager' || h.role === 'Supervisor' || h.employee_name === userFilter) {
-            if (h.employee_name) managerNames.add(h.employee_name);
-          }
+          if (h.employee_name) targetNames.add(h.employee_name);
         }
         if (h.employee_name === userFilter) {
-          if (h.supervisor_name) managerNames.add(h.supervisor_name);
-          else if (h.area_manager_name) managerNames.add(h.area_manager_name);
-          else if (h.blm_name && !h.blm_name.includes('Directory') && !h.blm_name.includes('TEAM')) managerNames.add(h.blm_name);
+          if (h.supervisor_name) targetNames.add(h.supervisor_name);
+          else if (h.area_manager_name) targetNames.add(h.area_manager_name);
+          else if (h.blm_name && !h.blm_name.includes('Directory') && !h.blm_name.includes('TEAM')) targetNames.add(h.blm_name);
         }
       });
-      r = r.filter(x => managerNames.has(x.manager_name) || managerNames.has(x.rep_name));
+      r = r.filter(x => targetNames.has(x.user_name));
     }
-    return r;
-  }, [coaching, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, visibleNames, profile, hierarchy]);
+
+    return r.map(x => {
+       const target = x.role === 'Area Manager' ? 6 : (x.role === 'Supervisor' ? 10 : 0);
+       const achieved = x.double_visit_days || 0;
+       const pct = target > 0 ? (achieved / target) * 100 : (achieved > 0 ? 100 : 0);
+       return { ...x, target, achieved, pct };
+    });
+  }, [fSummary, search, userFilter, hierarchy]);
 
   // ── Timing data: last visit time per rep per day ──────────────────────
   const timingData = useMemo(() => {
     if (!rawVisits?.length) return [];
 
-    // Identify dates where a user had an Activity or Office Work
-    const activityDates = new Set();
-    rawVisits.forEach(v => {
-      const isActivity = (v.acc_type_category || '').toLowerCase().includes('activity') ||
-        (v.acc_type_category || '').toLowerCase().includes('office') ||
-        (v.visit_type_category || '').toLowerCase().includes('activity') ||
-        (v.visit_type_category || '').toLowerCase().includes('office');
-      if (isActivity && v.user && v.visit_date) {
-        activityDates.add(`${v.user}|||${v.visit_date}`);
+    const processedVisits = filterByTimeGrain(rawVisits).map(v => {
+      const cat = (v.acc_type_category || '').toLowerCase();
+      let derivedShift = '';
+      if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) derivedShift = 'AM';
+      else if (cat.includes('clinic') || cat.includes('poly')) derivedShift = 'PM';
+      else derivedShift = v.shift;
+
+      const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
+      const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
+      
+      let visitMinutes = 0;
+      let timeStr = v.visit_time || '';
+      if (timeStr) {
+        if (typeof timeStr === 'number') {
+          visitMinutes = Math.floor(Math.round(timeStr * 24 * 3600) / 60);
+        } else {
+           const parts = String(timeStr).split(':');
+           if (parts.length >= 2) {
+             visitMinutes = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+             if (String(timeStr).toLowerCase().includes('pm') && parseInt(parts[0], 10) !== 12) visitMinutes += 12 * 60;
+             else if (String(timeStr).toLowerCase().includes('am') && parseInt(parts[0], 10) === 12) visitMinutes -= 12 * 60;
+           }
+        }
+      }
+      return { ...v, derivedShift, isPharmacy, isActivity, visitMinutes };
+    });
+
+    const pmActivityDates = new Set();
+    processedVisits.forEach(v => {
+      if (v.isActivity && (v.shift === 'PM' || v.derivedShift === 'PM' || v.visitMinutes >= 12 * 60) && v.user && v.visit_date) {
+        pmActivityDates.add(`${v.user}|||${v.visit_date}`);
       }
     });
 
-    // Include all visits, no longer filtered to PM Clinic only
-    const validVisits = rawVisits.filter(v => v.visit_date && v.visit_time);
+    // Include only valid PM visits for timing data
+    const validVisits = processedVisits.filter(v => v.visit_date && v.visitMinutes > 0 && v.derivedShift === 'PM' && !v.isPharmacy && !v.isActivity);
 
-    // Group by user + date, find latest time
     const byUserDate = {};
     validVisits.forEach(v => {
       const user = v.user || '';
@@ -1494,31 +1509,36 @@ export default function Dashboard() {
       if (!user || !date) return;
       const key = `${user}|||${date}`;
 
-      // Exclude this date entirely for this user if they had an activity that day!
-      if (activityDates.has(key)) return;
+      if (pmActivityDates.has(key)) return;
 
-      const time = v.visit_time || '';
-      if (!byUserDate[key] || time > byUserDate[key].time) {
-        byUserDate[key] = { user, date, time, team: v.team || '', employee_code: v.employee_code };
+      if (!byUserDate[key] || v.visitMinutes > byUserDate[key].visitMinutes) {
+        byUserDate[key] = { user, date, time: v.visit_time, visitMinutes: v.visitMinutes, team: v.team || '', employee_code: v.employee_code };
       }
     });
 
-    // Categorize each entry
-    const categorizeTime = (timeStr) => {
-      if (!timeStr) return 'unknown';
-      const mins = parseTimeToMinutes(timeStr);
-      if (mins === null) return 'unknown';
-      if (mins < 15 * 60) return 'early';    // before 3:00 PM (15:00)
-      if (mins <= 18 * 60) return 'normal';   // 3:00 PM - 6:00 PM (15:00-18:00)
-      return 'late';                           // after 6:00 PM (18:00)
+    const categorizeTime = (mins) => {
+      if (!mins) return 'unknown';
+      if (mins < 15 * 60) return 'early';
+      if (mins <= 18 * 60) return 'normal';
+      return 'late';
+    };
+
+    const formatTimeStr = (totalMins) => {
+      if (!totalMins) return '—';
+      let hrs = Math.floor(totalMins / 60);
+      let mins = Math.floor(totalMins % 60);
+      const ampm = hrs >= 12 ? 'PM' : 'AM';
+      if (hrs > 12) hrs -= 12;
+      if (hrs === 0) hrs = 12;
+      return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')} ${ampm}`;
     };
 
     return Object.values(byUserDate).map(entry => ({
       ...entry,
-      category: categorizeTime(entry.time),
-      formattedTime: entry.time ? formatMinutesToTime(parseTimeToMinutes(entry.time)) : '—',
+      category: categorizeTime(entry.visitMinutes),
+      formattedTime: formatTimeStr(entry.visitMinutes),
     }));
-  }, [rawVisits]);
+  }, [rawVisits, filterByTimeGrain]);
 
   // Filtered timing data (same team/search/user filters as other tabs)
   const fTiming = useMemo(() => {
@@ -1952,9 +1972,7 @@ export default function Dashboard() {
           <button className="hbtn hbtn-outline" style={{ padding: '6px 12px', fontSize: '13px' }} onClick={toggleTheme} title="Toggle Dark/Light Mode">
             {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
           </button>
-          <button className="hbtn hbtn-lang" onClick={() => setLang(lang === 'en' ? 'ar' : 'en')}>
-            {lang === 'en' ? 'عربي' : 'EN'}
-          </button>
+
           <div className="dash-user">
             <div className="du-name">{profile?.employee_name}</div>
             <div className="du-role">{profile?.role} · {profile?.employee_code}</div>
@@ -2606,6 +2624,7 @@ export default function Dashboard() {
                     rowKey="specialty"
                     colKey={specPivotMode === 'class' ? 'classification' : 'user_name'}
                     valueKey="call_count"
+                    secondValueKey="covered"
                     shiftFilter={shift}
                     userFilter={userFilter}
                     searchFilter={search}
@@ -2646,6 +2665,7 @@ export default function Dashboard() {
                     rowKey="product"
                     colKey={prodPivotMode === 'spec' ? 'specialty' : 'user_name'}
                     valueKey="call_count"
+                    secondValueKey="covered"
                     shiftFilter={shift}
                     userFilter={userFilter}
                     searchFilter={search}
@@ -2658,51 +2678,35 @@ export default function Dashboard() {
 
               {/* COACHING TAB */}
               {tab === 'coaching' && isMgr && (
-                filteredCoaching.length === 0 ? (
+                fCoaching.length === 0 ? (
                   <div className="dash-empty">
-                    {selectedManager
-                      ? (rtl ? 'لا توجد بيانات لهذا المدير' : 'No coaching data for this manager')
-                      : t.noData}
+                    {t.noData}
                   </div>
                 ) : (
                   <>
-                    {selectedManager && (
-                      <div className="coaching-selected-hdr">
-                        <span className="coaching-sel-name">{selectedManager}</span>
-                        <span className="coaching-sel-meta">
-                          {filteredCoaching.length} {rtl ? 'جلسة' : 'session'}{filteredCoaching.length !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                    )}
                     <div className="pivot-wrap">
                       <table className="pivot-tbl">
                         <thead>
                           <tr>
                             <th className="s-col">{rtl ? 'المدير' : 'Manager'}</th>
-                            <th className="rep-col">{rtl ? 'المندوب' : 'Rep'}</th>
-                            <th>{rtl ? 'التاريخ' : 'Date'}</th>
-                            <th>{rtl ? 'الفريق' : 'Team'}</th>
-                            <th>{rtl ? 'زيارات AM' : 'AM Visits'}</th>
-                            <th>{rtl ? 'مرافقة AM' : 'AM Acc.'}</th>
-                            <th>AM %</th>
-                            <th>{rtl ? 'زيارات PM' : 'PM Visits'}</th>
-                            <th>{rtl ? 'مرافقة PM' : 'PM Acc.'}</th>
-                            <th>PM %</th>
+                            <th>{rtl ? 'الدور' : 'Role'}</th>
+                            <th>{rtl ? 'المنطقة' : 'Territory'}</th>
+                            <th>{rtl ? 'أيام المرافقة الفعلية' : 'Achieved Coaching Days'}</th>
+                            <th>{rtl ? 'الهدف' : 'Target'}</th>
+                            <th>% {rtl ? 'من الهدف' : 'of Target'}</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {[...filteredCoaching].sort((a, b) => (a.manager_name || '').localeCompare(b.manager_name || '') || (a.coaching_date || '').localeCompare(b.coaching_date || '')).map((r, i) => (
-                            <tr key={r.id || i}>
-                              <td className="s-col">{r.manager_name}</td>
-                              <td className="rep-col">{r.rep_name}</td>
-                              <td>{formatDateDisplay(r.coaching_date)}</td>
-                              <td>{r.team || '—'}</td>
-                              <td>{r.am_visits || 0}</td>
-                              <td>{r.am_accompanied || 0}</td>
-                              <td>{r.am_visits ? Math.round((r.am_accompanied / r.am_visits) * 100) + '%' : '-'}</td>
-                              <td>{r.pm_visits || 0}</td>
-                              <td>{r.pm_accompanied || 0}</td>
-                              <td>{r.pm_visits ? Math.round((r.pm_accompanied / r.pm_visits) * 100) + '%' : '-'}</td>
+                          {[...fCoaching].sort((a, b) => b.pct - a.pct).map((r, i) => (
+                            <tr key={r.employee_code || i}>
+                              <td className="s-col">{r.user_name}</td>
+                              <td>{r.role}</td>
+                              <td>{r.territory}</td>
+                              <td>{r.achieved}</td>
+                              <td>{r.target}</td>
+                              <td style={{ color: r.pct < 80 ? '#ef4444' : 'inherit', fontWeight: r.pct < 80 ? '600' : 'normal' }}>
+                                {Math.round(r.pct)}%
+                              </td>
                             </tr>
                           ))}
                         </tbody>

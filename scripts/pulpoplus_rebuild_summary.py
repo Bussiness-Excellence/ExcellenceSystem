@@ -589,7 +589,10 @@ def _compute_user_row(user, user_records, team_by_user, managers,
     no_events         = day_based_count("Events")
     office_work_days  = day_based_count("Office Work")
 
+    user_code = next((r["existing_user_code"] for r in user_records if r.get("existing_user_code")), "")
+
     row = {
+        "Employee Code":              user_code,
         "Team":                       team_by_user.get(user, ""),
         "User":                       user,
         "Territory":                  territory_str,
