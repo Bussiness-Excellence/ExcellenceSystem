@@ -363,7 +363,8 @@ function TeamBriefCard({ rows, teamLabel, rtl, t, shift, isMgr, onSelectTeam }) 
               } else {
                 const item = agg[k];
                 if (item) {
-                  displayVal = fmtVal(item.avg, k);
+                  const useAvg = k.includes('rate') || k.includes('avg_');
+                  displayVal = fmtVal(useAvg ? item.avg : item.sum, k);
                 }
               }
               return (
