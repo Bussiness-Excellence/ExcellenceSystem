@@ -963,10 +963,23 @@ export default function Dashboard() {
         return;
       }
 
-      const summaries = overrideSpecialManagers(dashData?.summaries || []);
-      const specialty = dashData?.specialty || [];
-      const products = dashData?.products || [];
-      const coaching = dashData?.coaching || [];
+      const summaries = overrideSpecialManagers((dashData?.summaries || []).map(row => {
+        if ((row.user_name === 'postgres' || !row.user_name) && row.employee_code) {
+          const h = (hierarchy || []).find(x => x.employee_code === row.employee_code);
+          if (h && h.employee_name) row.user_name = h.employee_name;
+        }
+        return row;
+      }));
+      const mapPostgres = (arr) => (arr || []).map(row => {
+        if ((row.user_name === 'postgres' || !row.user_name) && row.employee_code) {
+          const h = (hierarchy || []).find(x => x.employee_code === row.employee_code);
+          if (h && h.employee_name) row.user_name = h.employee_name;
+        }
+        return row;
+      });
+      const specialty = mapPostgres(dashData?.specialty);
+      const products = mapPostgres(dashData?.products);
+      const coaching = mapPostgres(dashData?.coaching);
 
       // 3. Fetch raw visits ONLY for timing tab and per-row date filtering
       //    Scoped tightly: only columns needed, only the date range, max 5000 rows
@@ -1158,162 +1171,8 @@ export default function Dashboard() {
     const m = new Map();
     r.forEach(x => { m.set(x.user_name, { ...x }); });
     const finalArr = Array.from(m.values());
-
-    const formatTimeStr = (totalMins) => {
-      if (!totalMins) return '—';
-      let hrs = Math.floor(totalMins / 60);
-      let mins = Math.floor(totalMins % 60);
-      const ampm = hrs >= 12 ? 'PM' : 'AM';
-      if (hrs > 12) hrs -= 12;
-      if (hrs === 0) hrs = 12;
-      return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')} ${ampm}`;
-    };
-
-    if (rawVisits && rawVisits.length > 0) {
-      const processedVisits = filterByTimeGrain(rawVisits).map(v => {
-        const cat = (v.acc_type_category || '').toLowerCase();
-        let derivedShift = '';
-        if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) {
-          derivedShift = 'AM';
-        } else if (cat.includes('clinic') || cat.includes('poly')) {
-          derivedShift = 'PM';
-        } else {
-          derivedShift = v.shift;
-        }
-
-        const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
-        const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
-
-        let timeStr = v.visit_time || '';
-        let visitMinutes = 0;
-        if (timeStr) {
-          if (typeof timeStr === 'number') {
-            const totalSeconds = Math.round(timeStr * 24 * 3600);
-            visitMinutes = Math.floor(totalSeconds / 60);
-          } else {
-             const parts = String(timeStr).split(':');
-             if (parts.length >= 2) {
-               visitMinutes = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
-               if (String(timeStr).toLowerCase().includes('pm') && parseInt(parts[0], 10) !== 12) visitMinutes += 12 * 60;
-               else if (String(timeStr).toLowerCase().includes('am') && parseInt(parts[0], 10) === 12) visitMinutes -= 12 * 60;
-             }
-          }
-        }
-        return { ...v, derivedShift, isPharmacy, isActivity, visitMinutes };
-      });
-
-      const doubleVisitGroups = new Map();
-      processedVisits.forEach(v => {
-        if (!v.acc_name || !v.visit_date || !v.visit_time || !v.specialty || v.isPharmacy || v.isActivity) return;
-        const key = `${v.acc_name}||${v.visit_date}||${v.visit_time}||${v.specialty}`;
-        if (!doubleVisitGroups.has(key)) doubleVisitGroups.set(key, new Set());
-        doubleVisitGroups.get(key).add(v.user?.toLowerCase().trim());
-      });
-
-      finalArr.forEach(x => {
-        const normName = x.user_name?.toLowerCase().trim();
-        const code = x.employee_code;
-        const userVisits = processedVisits.filter(v => (code && String(v.employee_code).trim() === String(code).trim()) || (normName && v.user?.toLowerCase().trim() === normName));
-
-        // Find days with PM Activity or PM Office Work
-        const pmActivityDays = new Set(userVisits.filter(v => v.isActivity && (v.shift === 'PM' || v.derivedShift === 'PM' || v.visitMinutes >= 12 * 60)).map(v => v.visit_date).filter(Boolean));
-
-        // Filter out visits that land on a PM activity day (except for total raw visits which counts them)
-        const validVisits = userVisits.filter(v => !pmActivityDays.has(v.visit_date));
-
-        const validVisitsByDate = new Map();
-        validVisits.forEach(v => {
-           if (!v.visit_date) return;
-           if (!validVisitsByDate.has(v.visit_date)) validVisitsByDate.set(v.visit_date, []);
-           validVisitsByDate.get(v.visit_date).push(v);
-        });
-
-        let fieldWorkingDaysCount = 0;
-        let totalAmFirstVisitMinutes = 0;
-        let validAmFirstVisitDays = 0;
-        let amShiftDays = 0;
-        let pmShiftDays = 0;
-        let totalAmShiftDurMinutes = 0;
-        let validAmShiftDurDays = 0;
-        let totalPmShiftDurMinutes = 0;
-        let validPmShiftDurDays = 0;
-
-        validVisitsByDate.forEach((dayVisits) => {
-          const doctorVisits = dayVisits.filter(v => !v.isPharmacy && !v.isActivity);
-          const hasAm = doctorVisits.some(v => v.derivedShift === 'AM');
-          const hasPm = doctorVisits.some(v => v.derivedShift === 'PM');
-          
-          if (hasAm || hasPm) {
-            fieldWorkingDaysCount++;
-            if (hasAm) amShiftDays++;
-            if (hasPm) pmShiftDays++;
-
-            const amDoctorVisits = doctorVisits.filter(v => v.derivedShift === 'AM' && v.visitMinutes > 0);
-            if (amDoctorVisits.length > 0) {
-              const times = amDoctorVisits.map(v => v.visitMinutes).sort((a,b)=>a-b);
-              totalAmFirstVisitMinutes += times[0];
-              validAmFirstVisitDays++;
-              if (times.length > 1) {
-                totalAmShiftDurMinutes += (times[times.length - 1] - times[0]);
-                validAmShiftDurDays++;
-              }
-            }
-
-            const pmDoctorVisits = doctorVisits.filter(v => v.derivedShift === 'PM' && v.visitMinutes > 0);
-            if (pmDoctorVisits.length > 1) {
-              const times = pmDoctorVisits.map(v => v.visitMinutes).sort((a,b)=>a-b);
-              totalPmShiftDurMinutes += (times[times.length - 1] - times[0]);
-              validPmShiftDurDays++;
-            }
-          }
-        });
-
-        const amDoctorVisits = validVisits.filter(v => v.derivedShift === 'AM' && !v.isPharmacy && !v.isActivity);
-        x.am_calls = amDoctorVisits.length;
-        x.amcenter_covered = new Set(amDoctorVisits.map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-        x.am_accounts_unique = new Set(amDoctorVisits.map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
-
-        const pmDoctorVisits = validVisits.filter(v => v.derivedShift === 'PM' && !v.isPharmacy && !v.isActivity);
-        x.pm_calls = pmDoctorVisits.length;
-        x.clinic_covered = new Set(pmDoctorVisits.map(v => v.doctor_key || v.doctor_name).filter(Boolean)).size;
-        x.polyclinic_covered = new Set(pmDoctorVisits.map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
-
-        const pharmacyVisits = validVisits.filter(v => v.isPharmacy);
-        x.pharmacies_visited = pharmacyVisits.length;
-        x.pharmacies_covered = new Set(pharmacyVisits.map(v => v.acc_id || v.acc_name).filter(Boolean)).size;
-
-        let doubleVisitsCount = 0;
-        validVisits.forEach(v => {
-          if (!v.acc_name || !v.visit_date || !v.visit_time || !v.specialty || v.isPharmacy || v.isActivity) return;
-          const key = `${v.acc_name}||${v.visit_date}||${v.visit_time}||${v.specialty}`;
-          const usersInVisit = doubleVisitGroups.get(key);
-          if (usersInVisit && usersInVisit.size > 1 && usersInVisit.has(normName)) {
-            doubleVisitsCount++;
-          }
-        });
-        x.double_visit_days = doubleVisitsCount;
-
-        x.working_days = fieldWorkingDaysCount;
-        x.am_shift_days = amShiftDays;
-        x.pm_shift_days = pmShiftDays;
-
-        x.avg_am_start_time = validAmFirstVisitDays > 0 ? formatTimeStr(totalAmFirstVisitMinutes / validAmFirstVisitDays) : '—';
-        x.avg_am_shift_hm = validAmShiftDurDays > 0 ? (totalAmShiftDurMinutes / validAmShiftDurDays) / 60 : 0;
-        x.avg_pm_shift_hm = validPmShiftDurDays > 0 ? (totalPmShiftDurMinutes / validPmShiftDurDays) / 60 : 0;
-
-        x.total_visits = userVisits.length;
-        x.no_activities = 0;
-        x.no_events = 0;
-        x.office_work_days = pmActivityDays.size;
-        x.total_am_covered = x.amcenter_covered;
-        x.total_pm_covered = x.clinic_covered + x.polyclinic_covered;
-        x.am_call_rate = amShiftDays > 0 ? Math.round((x.am_calls / amShiftDays) * 10) / 10 : 0;
-        x.pm_call_rate = pmShiftDays > 0 ? Math.round((x.pm_calls / pmShiftDays) * 10) / 10 : 0;
-      });
-    }
-
     return sortSummary(finalArr);
-  }, [summary, rawVisits, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy, filterByTimeGrain]);
+  }, [summary, byTeam, byLineManager, byManagerTerritory, search, userFilter, hierarchy]);
 
   const managerNames = useMemo(() => {
     const s = new Set();
@@ -1324,117 +1183,22 @@ export default function Dashboard() {
   }, [summary]);
 
   const fSpecialty = useMemo(() => {
-    if (rawVisits && rawVisits.length > 0 && rawVisits.some(v => v.specialty)) {
-      const filteredVisits = filterByTimeGrain(rawVisits);
-      const map = new Map();
-      filteredVisits.forEach(v => {
-        if (!v.specialty) return;
-        const u = v.user || v.user_name || 'Unknown';
-        const spec = v.specialty;
-        const cls = v.classification || 'Unclassified';
-        
-        const cat = (v.acc_type_category || '').toLowerCase();
-        let shft = '';
-        if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) {
-          shft = 'AM';
-        } else if (cat.includes('clinic') || cat.includes('poly')) {
-          shft = 'PM';
-        } else {
-          shft = v.shift || 'AM';
-        }
-
-        const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
-        const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
-        
-        if (isPharmacy || isActivity) return;
-
-        const key = `${u}||${spec}||${cls}||${shft}`;
-        if (!map.has(key)) {
-          map.set(key, {
-            user_name: u,
-            employee_code: v.employee_code,
-            specialty: spec,
-            classification: cls,
-            shift: shft,
-            call_count: 0,
-            _coveredSet: new Set(),
-            covered: 0,
-            team: userTeamMap[u.toLowerCase().trim()] || v.team || ''
-          });
-        }
-        
-        const item = map.get(key);
-        item.call_count += 1;
-        if (v.doctor_key || v.doctor_name) {
-           item._coveredSet.add(v.doctor_key || v.doctor_name);
-        }
-      });
-      let r = Array.from(map.values()).map(x => { x.covered = x._coveredSet.size; return x; });
-      r = byManagerTerritory(byLineManager(byTeam(r)));
-      if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
-      if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
-      if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
-      return r;
-    }
-    return [];
-  }, [rawVisits, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, managerNames, userTeamMap]);
+    if (!specialty || specialty.length === 0) return [];
+    let r = byManagerTerritory(byLineManager(byTeam(specialty)));
+    if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
+    if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
+    if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
+    return r;
+  }, [specialty, byTeam, byLineManager, byManagerTerritory, search, userFilter, managerNames]);
 
   const fProducts = useMemo(() => {
-    if (rawVisits && rawVisits.length > 0 && rawVisits.some(v => v.products)) {
-      const filteredVisits = filterByTimeGrain(rawVisits);
-      const map = new Map();
-      filteredVisits.forEach(v => {
-        if (!v.products) return;
-        const u = v.user || v.user_name || 'Unknown';
-        const spec = v.specialty || 'General';
-        
-        const cat = (v.acc_type_category || '').toLowerCase();
-        let shft = '';
-        if (cat.includes('hospital') || cat.includes('am center') || cat.includes('distributer') || cat.includes('distributor')) {
-          shft = 'AM';
-        } else if (cat.includes('clinic') || cat.includes('poly')) {
-          shft = 'PM';
-        } else {
-          shft = v.shift || 'AM';
-        }
-
-        const isPharmacy = cat.includes('pharmacy') || (v.acc_type_raw || '').toLowerCase().includes('pharmacy') || (v.acc_name || '').toLowerCase().includes('pharmacy');
-        const isActivity = cat.includes('activity') || cat.includes('office') || (v.visit_type_category || '').toLowerCase().includes('activity') || (v.visit_type_category || '').toLowerCase().includes('office');
-        
-        if (isPharmacy || isActivity) return;
-
-        const prods = v.products.split(',').map(p => p.trim()).filter(Boolean);
-        prods.forEach(prod => {
-          const key = `${u}||${spec}||${prod}||${shft}`;
-          if (!map.has(key)) {
-            map.set(key, {
-              user_name: u,
-              employee_code: v.employee_code,
-              specialty: spec,
-              product: prod,
-              shift: shft,
-              call_count: 0,
-              _coveredSet: new Set(),
-              covered: 0,
-              team: userTeamMap[u.toLowerCase().trim()] || v.team || ''
-            });
-          }
-          const item = map.get(key);
-          item.call_count += 1;
-          if (v.doctor_key || v.doctor_name) {
-             item._coveredSet.add(v.doctor_key || v.doctor_name);
-          }
-        });
-      });
-      let r = Array.from(map.values()).map(x => { x.covered = x._coveredSet.size; return x; });
-      r = byManagerTerritory(byLineManager(byTeam(r)));
-      if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
-      if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
-      if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
-      return r;
-    }
-    return [];
-  }, [rawVisits, filterByTimeGrain, byTeam, byLineManager, byManagerTerritory, search, userFilter, managerNames, userTeamMap]);
+    if (!products || products.length === 0) return [];
+    let r = byManagerTerritory(byLineManager(byTeam(products)));
+    if (search) r = r.filter(x => x.user_name?.toLowerCase().includes(search.toLowerCase()) || x.territory?.toLowerCase().includes(search.toLowerCase()));
+    if (userFilter !== 'all') r = r.filter(x => x.user_name === userFilter);
+    if (userFilter === 'all') r = r.filter(x => !managerNames.has((x.user_name || '').toLowerCase().trim()));
+    return r;
+  }, [products, byTeam, byLineManager, byManagerTerritory, search, userFilter, managerNames]);
 
   const visibleNames = useMemo(() => {
     if (!hierarchy?.length || !visibleCodes?.length) return null;
