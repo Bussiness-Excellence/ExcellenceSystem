@@ -948,41 +948,38 @@ export default function Dashboard() {
       (async () => {
         let allVisits = [];
         const step = 1000;
+        let start = 0;
+        let hasMore = true;
         
-        let baseQuery = supabase.from('visits');
-        
-        let countQuery = baseQuery.select('*', { count: 'exact', head: true });
-        if (!isAdmin) countQuery = countQuery.in('employee_code', codes);
-        if (rangeStart && rangeEnd) {
-          countQuery = countQuery.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
-        } else if (periodLabel) {
-          countQuery = countQuery.eq('period', periodLabel);
-        }
-        
-        const { count, error: countErr } = await countQuery;
-        if (countErr) return { error: countErr };
-        if (!count) return { data: [] };
-        
-        const promises = [];
-        for (let i = 0; i < count; i += step) {
-          let q = supabase.from('visits')
-            .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products')
-            .range(i, i + step - 1);
-            
-          if (!isAdmin) q = q.in('employee_code', codes);
-            
-          if (rangeStart && rangeEnd) {
-            q = q.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
-          } else if (periodLabel) {
-            q = q.eq('period', periodLabel);
+        while (hasMore) {
+          const promises = [];
+          for (let i = 0; i < 5; i++) {
+            let q = supabase.from('visits')
+              .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products')
+              .range(start, start + step - 1);
+              
+            if (!isAdmin) q = q.in('employee_code', codes);
+              
+            if (rangeStart && rangeEnd) {
+              q = q.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
+            } else if (periodLabel) {
+              q = q.eq('period', periodLabel);
+            }
+            promises.push(q);
+            start += step;
           }
-          promises.push(q);
-        }
-        
-        const results = await Promise.all(promises);
-        for (const res of results) {
-          if (res.error) return { error: res.error };
-          if (res.data) allVisits = allVisits.concat(res.data);
+          
+          const results = await Promise.all(promises);
+          for (const res of results) {
+            if (res.error) return { error: res.error };
+            if (res.data) {
+              allVisits = allVisits.concat(res.data);
+              if (res.data.length < step) hasMore = false;
+            } else {
+              hasMore = false;
+            }
+          }
+          if (!hasMore) break;
         }
         
         return { data: allVisits };
