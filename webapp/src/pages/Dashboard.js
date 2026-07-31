@@ -877,12 +877,11 @@ export default function Dashboard() {
 
   const load = useCallback(async (force = false) => {
     if (!visibleCodes?.length) { setLoading(false); return; }
+    if (!force && fetchedKeyRef.current === currentKey) return;
+
     const isAdmin = profile?.role === 'Admin';
     const codes = visibleCodes;
     const cacheKey = `dash_${periodLabel}_${isMgr}_${codesKey}_${timeGrain}_${selectedDate || ''}`;
-
-    // Skip if already fetched this key (tab switch won't retrigger)
-    if (!force && fetchedKeyRef.current === currentKey) return;
 
     const SPECIAL_MANAGERS = [
       'ahmad morsy', 'ahmed elasyed', 'ahmed tarek mohamed', 'akram ahmed elhossary',
@@ -894,18 +893,20 @@ export default function Dashboard() {
 
     const overrideSpecialManagers = (rows) => (rows || []).map(r => {
       const name = (r.user_name || r.employee_name || r.manager_name || r.rep_name || '').toLowerCase();
-      if (SPECIAL_MANAGERS.includes(name)) {
-        return { ...r, team: 'Other Managers' };
-      }
-      return r;
+      return SPECIAL_MANAGERS.includes(name) ? { ...r, team: 'Other Managers' } : r;
     });
 
-    // Try sessionStorage cache first
+    // Try cache first
     const cached = !force && sessionStorage.getItem(cacheKey);
     if (cached) {
       try {
+        const parsed = JSON.parse(cached);
         setSummary(overrideSpecialManagers(parsed.summaries));
-        if (parsed.visits) setVisits(parsed.visits);
+        setSpecialty(parsed.specialty || []);
+        setProducts(parsed.products || []);
+        setCoaching(parsed.coaching || []);
+        setVisits(parsed.visits || []);
+        if (parsed.teamsMap) setTeamsMap(parsed.teamsMap);
         fetchedKeyRef.current = currentKey;
         setLoading(false);
         return;
@@ -913,10 +914,8 @@ export default function Dashboard() {
     }
 
     setLoading(true); setError('');
-    // Resolve periodLabel + timeGrain (+ selectedDate for daily mode) into
-    // real ISO date bounds, so the network fetch itself is scoped to the
-    // selected week/day — not just filtered client-side after downloading
-    // the whole month every time.
+
+    // Resolve date bounds
     const periodDate = periodLabel ? new Date(`1 ${periodLabel}`) : null;
     let rangeStart = null, rangeEnd = null;
     if (periodDate && !isNaN(periodDate.getTime())) {
@@ -925,106 +924,92 @@ export default function Dashboard() {
       const lastDay = new Date(y, m + 1, 0).getDate();
       const pad = (n) => String(n).padStart(2, '0');
       const dayStr = (d) => `${y}-${pad(m + 1)}-${pad(d)}`;
-
       const grainRange = GRAIN_RANGES[timeGrain];
       if (timeGrain === 'daily' && selectedDate) {
         const norm = normalizeDateStr(selectedDate);
-        // An unparseable selected date must not silently widen to the whole month.
         rangeStart = norm || dayStr(1);
         rangeEnd = norm || dayStr(lastDay);
       } else if (grainRange) {
-        // Clamp to the real length of this month so week4/biweekly2 don't ask for
-        // a 31st that doesn't exist.
         rangeStart = dayStr(Math.min(grainRange[0], lastDay));
         rangeEnd = dayStr(Math.min(grainRange[1], lastDay));
       } else {
-        // 'all' (whole month) — still bounded, just the full month
-        rangeStart = dayStr(1); rangeEnd = dayStr(lastDay);
+        rangeStart = dayStr(1);
+        rangeEnd = dayStr(lastDay);
       }
     }
 
-    const [teamsRes, visitsRes] = await Promise.all([
-      supabase.from('teams').select('id, name'),
-      (async () => {
-        let allVisits = [];
-        const step = 1000;
-        let start = 0;
-        let hasMore = true;
-        
-        while (hasMore) {
-          const promises = [];
-          for (let i = 0; i < 5; i++) {
-            let q = supabase.from('visits')
-              .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products')
-              .range(start, start + step - 1);
-              
-            if (!isAdmin) q = q.in('employee_code', codes);
-              
-            if (rangeStart && rangeEnd) {
-              q = q.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
-            } else if (periodLabel) {
-              q = q.eq('period', periodLabel);
-            }
-            promises.push(q);
-            start += step;
-          }
-          
-          const results = await Promise.all(promises);
-          for (const res of results) {
-            if (res.error) return { error: res.error };
-            if (res.data) {
-              allVisits = allVisits.concat(res.data);
-              if (res.data.length < step) hasMore = false;
-            } else {
-              hasMore = false;
-            }
-          }
-          if (!hasMore) break;
+    try {
+      // 1. Fetch teams (tiny, fast)
+      const teamsRes = await supabase.from('teams').select('id, name');
+      let tMap = {};
+      if (teamsRes.data) {
+        teamsRes.data.forEach(t => tMap[t.id] = t.name);
+        setTeamsMap(tMap);
+      }
+
+      // 2. Call get_dashboard_data — single RPC, all aggregations done in Supabase
+      const { data: dashData, error: dashErr } = await supabase.rpc('get_dashboard_data', {
+        p_period: periodLabel,
+        p_codes: isAdmin ? [] : codes,
+        p_is_admin: isAdmin,
+        p_is_manager: isMgr,
+        p_start_date: rangeStart || null,
+        p_end_date: rangeEnd || null,
+      });
+
+      if (dashErr) {
+        setError(dashErr.message);
+        setLoading(false);
+        return;
+      }
+
+      const summaries = overrideSpecialManagers(dashData?.summaries || []);
+      const specialty = dashData?.specialty || [];
+      const products = dashData?.products || [];
+      const coaching = dashData?.coaching || [];
+
+      // 3. Fetch raw visits ONLY for timing tab and per-row date filtering
+      //    Scoped tightly: only columns needed, only the date range, max 5000 rows
+      let visits = [];
+      if (timeGrain !== 'all' || true) { // always fetch for timing tab
+        let q = supabase
+          .from('visits')
+          .select('user,employee_code,visit_date,visit_time,shift,acc_type_category,acc_type_raw,visit_type_category,doctor_name,doctor_key,acc_name,acc_id,team,specialty,classification,products')
+          .order('visit_date', { ascending: false })
+          .limit(5000);
+
+        if (!isAdmin) q = q.in('employee_code', codes);
+        if (rangeStart && rangeEnd) {
+          q = q.gte('visit_date', rangeStart).lte('visit_date', rangeEnd);
+        } else if (periodLabel) {
+          q = q.eq('period', periodLabel);
         }
-        
-        return { data: allVisits };
-      })()
-    ]);
 
-    if (visitsRes.data) setVisits(visitsRes.data);
+        const { data: visitsData, error: visitsErr } = await q;
+        if (visitsErr) console.warn('Visits fetch error:', visitsErr.message);
+        visits = visitsData || [];
+      }
 
-    let tMap = {};
-    if (teamsRes.data) {
-      teamsRes.data.forEach(t => tMap[t.id] = t.name);
-      setTeamsMap(tMap);
-    }
+      setSummary(summaries);
+      setSpecialty(specialty);
+      setProducts(products);
+      setCoaching(coaching);
+      setVisits(visits);
 
-    if (visitsRes.error) {
-      setError(visitsRes.error.message);
-    } else {
-      // Build base summary from hierarchy so we have a row for every visible user
-      const baseSummaries = (hierarchy || [])
-        .filter(h => codes.includes(h.employee_code))
-        .map(h => ({
-          user_name: h.employee_name,
-          employee_code: h.employee_code,
-          role: h.role,
-          is_manager: h.role !== 'MR',
-          team: tMap[h.team_id] || 'Unknown',
-          territory: h.division_name || '',
-          manager_name: h.supervisor_name || h.area_manager_name || h.blm_name || '',
-        }));
-      
-      const dataToCache = { summaries: baseSummaries, visits: visitsRes.data };
+      // Cache it
       try {
-        sessionStorage.setItem(cacheKey, JSON.stringify(dataToCache));
-      } catch (e) { }
+        sessionStorage.setItem(cacheKey, JSON.stringify({
+          summaries, specialty, products, coaching, visits, teamsMap: tMap
+        }));
+      } catch (e) { /* quota exceeded, skip */ }
 
-      setSummary(overrideSpecialManagers(baseSummaries));
+    } catch (e) {
+      setError(e.message);
     }
 
-    setSpecialty([]);
-    setProducts([]);
-    setCoaching([]);
     fetchedKeyRef.current = currentKey;
     setLoading(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [periodLabel, currentKey, isMgr, profile, timeGrain, selectedDate]);
+  }, [periodLabel, currentKey, isMgr, profile, timeGrain, selectedDate, visibleCodes, codesKey, GRAIN_RANGES, normalizeDateStr]);
 
   useEffect(() => { load(); }, [load]);
 
